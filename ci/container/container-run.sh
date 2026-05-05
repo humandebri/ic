@@ -132,8 +132,10 @@ elif ! "${CONTAINER_CMD[@]}" image exists $IMAGE; then
     fi
 fi
 
+
 if [ "$DEVENV" = true ]; then
     eprintln "Purging non-relevant container images"
+    sleep 5
     "${CONTAINER_CMD[@]}" image prune -a -f --filter "reference!=$IMAGE"
 fi
 

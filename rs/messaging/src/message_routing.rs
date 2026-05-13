@@ -132,6 +132,7 @@ const CRITICAL_ERROR_NO_CANISTER_ALLOCATION_RANGE: &str = "mr_empty_canister_all
 const CRITICAL_ERROR_FAILED_TO_READ_REGISTRY: &str = "mr_failed_to_read_registry_error";
 pub const CRITICAL_ERROR_NON_INCREASING_BATCH_TIME: &str = "mr_non_increasing_batch_time";
 pub const CRITICAL_ERROR_INDUCT_RESPONSE_FAILED: &str = "mr_induct_response_failed";
+pub const CRITICAL_ERROR_ENGINE_MESSAGE: &str = "mr_engine_message";
 const CRITICAL_ERROR_ILLEGAL_NON_EMPTY_SUBNET_ADMINS: &str = "mr_illegal_non_empty_subnet_admins";
 
 /// Records the timestamp when all messages before the given index (down to the
@@ -367,6 +368,10 @@ pub(crate) struct MessageRoutingMetrics {
     /// Critical error counter (see [`MetricsRegistry::error_counter`]) tracking
     /// failures to induct responses.
     pub critical_error_induct_response_failed: IntCounter,
+    /// Critical error counter (see [`MetricsRegistry::error_counter`]) tracking
+    /// messages to/from CloudEngine subnets that carried cycles or were
+    /// guaranteed-response calls, which are not permitted on non-engine subnets.
+    pub critical_error_engine_message: IntCounter,
     /// Critical error: a non-rental subnet has a non-empty subnet admins list.
     critical_error_illegal_non_empty_subnet_admins: IntCounter,
 
@@ -528,6 +533,8 @@ impl MessageRoutingMetrics {
                 .error_counter(CRITICAL_ERROR_NON_INCREASING_BATCH_TIME),
             critical_error_induct_response_failed: metrics_registry
                 .error_counter(CRITICAL_ERROR_INDUCT_RESPONSE_FAILED),
+            critical_error_engine_message: metrics_registry
+                .error_counter(CRITICAL_ERROR_ENGINE_MESSAGE),
             critical_error_illegal_non_empty_subnet_admins: metrics_registry
                 .error_counter(CRITICAL_ERROR_ILLEGAL_NON_EMPTY_SUBNET_ADMINS),
 
@@ -867,11 +874,8 @@ impl<RegistryClient_: RegistryClient> BatchProcessorImpl<RegistryClient_> {
             .unwrap_or(SubnetType::CloudEngine);
 
         let api_boundary_nodes = self.try_to_populate_api_boundary_nodes(registry_version)?;
-        let network_topology = self.try_to_populate_network_topology(
-            registry_version,
-            own_subnet_id,
-            own_subnet_type,
-        )?;
+        let network_topology =
+            self.try_to_populate_network_topology(registry_version, own_subnet_id)?;
 
         let provisional_whitelist = self
             .registry
@@ -997,7 +1001,6 @@ impl<RegistryClient_: RegistryClient> BatchProcessorImpl<RegistryClient_> {
         &self,
         registry_version: RegistryVersion,
         own_subnet_id: SubnetId,
-        own_subnet_type: SubnetType,
     ) -> Result<NetworkTopology, ReadRegistryError> {
         use ReadRegistryError::Persistent;
 
@@ -1151,43 +1154,17 @@ impl<RegistryClient_: RegistryClient> BatchProcessorImpl<RegistryClient_> {
             .map_err(|err| registry_error("routing table", None, err))?
             .unwrap_or_default();
 
-        // Derive filtered subnets and routing table.
-        let (subnets, routing_table) = if own_subnet_type == SubnetType::CloudEngine {
-            // CloudEngine subnets only see themselves.
-            let subnets = all_subnets
-                .iter()
-                .filter(|(id, _)| **id == own_subnet_id)
-                .map(|(id, topo)| (*id, topo.clone()))
-                .collect();
-            let routing_table = full_routing_table
-                .iter()
-                .filter(|(_, id)| **id == own_subnet_id)
-                .map(|(range, id)| (*range, *id))
-                .collect::<BTreeMap<_, _>>()
-                .try_into()
-                .map_err(|err| {
-                    Persistent(format!(
-                        "'filtered routing table for CloudEngine subnet {}', err: {:?}",
-                        own_subnet_id, err
-                    ))
-                })?;
-            (subnets, routing_table)
-        } else {
-            // Non-engine subnets see every subnet that is *not* a CloudEngine.
-            let subnets: BTreeMap<_, _> = all_subnets
-                .iter()
-                .filter(|(_, topo)| topo.subnet_type != SubnetType::CloudEngine)
-                .map(|(id, topo)| (*id, topo.clone()))
-                .collect();
-            let routing_table = full_routing_table
-                .iter()
-                .filter(|(_, id)| subnets.contains_key(id))
-                .map(|(range, id)| (*range, *id))
-                .collect::<BTreeMap<_, _>>()
-                .try_into()
-                .map_err(|err| Persistent(format!("'filtered routing table', err: {:?}", err)))?;
-            (subnets, routing_table)
-        };
+        // All subnets see the full topology, including CloudEngine subnets.
+        let subnets: BTreeMap<_, _> = all_subnets
+            .iter()
+            .map(|(id, topo)| (*id, topo.clone()))
+            .collect();
+        let routing_table = full_routing_table
+            .iter()
+            .map(|(range, id)| (*range, *id))
+            .collect::<BTreeMap<_, _>>()
+            .try_into()
+            .map_err(|err| Persistent(format!("routing table err: {:?}", err)))?;
         let canister_migrations = self
             .registry
             .get_canister_migrations(registry_version)

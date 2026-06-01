@@ -15,19 +15,17 @@ warn() {
     tput -T xterm sgr0 >&2
 }
 
-if [ -e /run/.containerenv ]; then
+RUNTIME="${CONTAINER_RUNTIME:-podman}" # TODO: read from env and error if runtime is not podman or docker
+
+eprintln "Using container runtime $RUNTIME"
+
+if [ -e /run/.containerenv ] || [ -e /.dockerenv ]; then
     eprintln "Nested $0 is not supported."
     exit 1
 fi
 
-if ! which podman >/dev/null 2>&1; then
-    eprintln "Podman needs to be installed to run this script."
-    exit 1
-fi
-
-# Verify podman is reachable/responding
-if ! podman info >/dev/null 2>&1; then
-    eprintln "Podman found but not responding (daemon/service not running or not reachable)."
+if ! which "$RUNTIME" >/dev/null 2>&1; then
+    eprintln "Could not find container runtime '$RUNTIME'."
     exit 1
 fi
 
@@ -107,23 +105,30 @@ else
     DEVENV=false
 fi
 
-if [ "$DEVENV" = true ]; then
+if [ "$DEVENV" = true ] && [ "$RUNTIME" = podman ]; then
     echo "Using hoststorage for podman root."
     CONTAINER_CMD=(sudo podman --root /hoststorage/podman-root)
-else
+elif [ "$RUNTIME" = podman ]; then
     CONTAINER_CMD=(sudo podman)
+elif [ "$RUNTIME" = docker ]; then
+    CONTAINER_CMD=(docker)
 fi
 
 echo "Using container command: ${CONTAINER_CMD[*]}"
+
+# Verify podman is reachable/responding
+if ! eval "${CONTAINER_CMD[*]} info" >/dev/null 2>&1; then
+    eprintln "Container runtimer '$RUNTIME' found but not responding (daemon/service not running or not reachable)."
+    exit 1
+fi
+
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 IMAGE_TAG=$("$REPO_ROOT"/ci/container/get-image-tag.sh)
 IMAGE="ghcr.io/dfinity/$IMAGE_NAME:$IMAGE_TAG"
 
-if ! "${CONTAINER_CMD[@]}" image exists $IMAGE; then
-    if ! "${CONTAINER_CMD[@]}" pull $IMAGE; then
-        "$REPO_ROOT"/ci/container/build-image.sh --image "$IMAGE_NAME"
-    fi
+if ! "$RUNTIME" pull "$IMAGE"; then
+    "$REPO_ROOT"/ci/container/build-image.sh --image "$IMAGE_NAME" --container-cmd "$RUNTIME"
 fi
 
 if [ "$DEVENV" = true ]; then
@@ -140,14 +145,15 @@ if [ "$DEVENV" = true ]; then
 fi
 
 WORKDIR="/ic"
-USER=$(whoami)
+# USER=$(whoami)
 
-PODMAN_RUN_ARGS=(
+RUNTIME_RUN_ARGS=(
     -w "$WORKDIR"
     --rm              # remove container after it ran
     --log-driver=none # by default podman logs all of stdout to the journal which is resource-consuming and wasteful
 
-    -u "ubuntu:ubuntu"
+    # -u "ubuntu:ubuntu"
+    --user 1001:1001 # TODO: adapt to host user
     -e HOSTUSER="$USER"
     -e HOSTHOSTNAME="$HOSTNAME"
     -e VERSION="${VERSION:-$(git rev-parse HEAD)}"
@@ -156,26 +162,31 @@ PODMAN_RUN_ARGS=(
     -e CARGO_TERM_COLOR
     --hostname=devenv-container
     --add-host devenv-container:127.0.0.1
-    --entrypoint=
     --init
 )
 
-PODMAN_RUN_ARGS+=(--hostuser="$USER")
-
-if [ "$(id -u)" = "1000" ]; then
-    CTR_HOME="/home/ubuntu"
-else
-    CTR_HOME="/ic"
+if [ "$RUNTIME" = "podman" ]; then
+    RUNTIME_RUN_ARGS+=(--hostuser="$USER")
 fi
 
+
+# if [ "$(id -u)" = "1000" ]; then
+#     CTR_HOME="/home/ubuntu"
+# else
+#     CTR_HOME="/ic"
+# fi
+
+CTR_HOME="/home/buildifier" # TODO adapt
 # NOTE: in devenvs, ~/.cache is `/hoststorage/cache`
-CACHE_DIR="${CACHE_DIR:-${HOME}/.cache}"
+WORKSPACES_DIR="$(dirname "$REPO_ROOT")"
+CACHE_DIR="${CACHE_DIR:-${WORKSPACES_DIR}/ic-docker-cache}"
+mkdir -p "$CACHE_DIR"
 
 ZIG_CACHE="${CACHE_DIR}/zig-cache"
 mkdir -p "${ZIG_CACHE}"
 
-ICT_TESTNETS_DIR="/tmp/ict_testnets"
-mkdir -p "${ICT_TESTNETS_DIR}"
+# ICT_TESTNETS_DIR="/tmp/ict_testnets"
+# mkdir -p "${ICT_TESTNETS_DIR}"
 
 # make sure we have all bind-mounts
 # ~/.aws, ~/.ssh: credentials forwarded to the container
@@ -183,10 +194,10 @@ mkdir -p "${ICT_TESTNETS_DIR}"
 # ~/.claude: persisted claude settings
 mkdir -p ~/.{aws,ssh,cache,claude}
 
-PODMAN_RUN_ARGS+=(
+RUNTIME_RUN_ARGS+=(
     --mount type=bind,source="${REPO_ROOT}",target="${WORKDIR}"
-    --mount type=bind,source="${ZIG_CACHE}",target="/tmp/zig-cache"
-    --mount type=bind,source="${ICT_TESTNETS_DIR}",target="${ICT_TESTNETS_DIR}"
+    # --mount type=bind,source="${ZIG_CACHE}",target="/tmp/zig-cache"
+    # --mount type=bind,source="${ICT_TESTNETS_DIR}",target="${ICT_TESTNETS_DIR}"
     --mount type=bind,source="${HOME}/.aws",target="${CTR_HOME}/.aws"
     --mount type=bind,source="${HOME}/.ssh",target="${CTR_HOME}/.ssh"
     --mount type=bind,source="${CACHE_DIR}",target="${CTR_HOME}/.cache"
@@ -197,24 +208,24 @@ PODMAN_RUN_ARGS+=(
 # In the devenv, inject some extra files into the container for convenience
 if [ "$DEVENV" = true ]; then
     if [ -e "${HOME}/.gitconfig" ]; then
-        PODMAN_RUN_ARGS+=(
+        RUNTIME_RUN_ARGS+=(
             --mount type=bind,source="${HOME}/.gitconfig",target="/home/ubuntu/.gitconfig"
         )
     fi
 
     if [ -e "${HOME}/.bash_history" ]; then
-        PODMAN_RUN_ARGS+=(
+        RUNTIME_RUN_ARGS+=(
             --mount type=bind,source="${HOME}/.bash_history",target="/home/ubuntu/.bash_history"
         )
 
     fi
     if [ -e "${HOME}/.local/share/fish" ]; then
-        PODMAN_RUN_ARGS+=(
+        RUNTIME_RUN_ARGS+=(
             --mount type=bind,source="${HOME}/.local/share/fish",target="/home/ubuntu/.local/share/fish"
         )
     fi
     if [ -e "${HOME}/.zsh_history" ]; then
-        PODMAN_RUN_ARGS+=(
+        RUNTIME_RUN_ARGS+=(
             --mount type=bind,source="${HOME}/.zsh_history",target="/home/ubuntu/.zsh_history"
         )
     fi
@@ -225,13 +236,13 @@ if [ "$DEVENV" = true ]; then
     CARGO_TARGET_DIR="$CACHE_DIR/cargo"
     mkdir -p "$CARGO_TARGET_DIR"
 
-    PODMAN_RUN_ARGS+=(
+    RUNTIME_RUN_ARGS+=(
         --mount type=bind,source="$CARGO_TARGET_DIR",target="/ic/target"
     )
 fi
 
 if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -e "${SSH_AUTH_SOCK:-}" ]; then
-    PODMAN_RUN_ARGS+=(
+    RUNTIME_RUN_ARGS+=(
         -v "$SSH_AUTH_SOCK:/ssh-agent"
         -e SSH_AUTH_SOCK="/ssh-agent"
     )
@@ -241,12 +252,33 @@ fi
 
 # if a user is attached, make it interactive and create tty
 if tty >/dev/null 2>&1; then
-    PODMAN_RUN_ARGS+=(-i -t)
+    RUNTIME_RUN_ARGS+=(-i -t)
 fi
 
-# Privileged rootful podman is required due to requirements of IC-OS guest build;
-# additionally, we need to use hosts's cgroups and network.
-PODMAN_RUN_ARGS+=(--pids-limit=-1 --privileged --network=host --cgroupns=host)
+if [ "$RUNTIME" = podman ]; then
+    # Privileged rootful podman is required due to requirements of IC-OS guest build;
+    # additionally, we need to use hosts's cgroups and network.
+    RUNTIME_RUN_ARGS+=(--pids-limit=-1 --privileged --network=host --cgroupns=host)
+elif [ "$RUNTIME" = docker ]; then
+    # Rootless podman _inside this container_ (used by ICOS) needs: fuse-overlayfs
+    # for storage (kernel-native rootless overlay isn't reliable yet under
+    # namespaced docker daemons), unrestricted seccomp/apparmor profiles for
+    # its syscalls, CAP_SYS_ADMIN so newuidmap can set up a user namespace, an
+    # unmasked /proc so the nested container can mount its own procfs, and
+    # --network=host so the inner build reaches the registry without
+    # per-network plumbing.
+    RUNTIME_RUN_ARGS+=(
+        --device /dev/fuse
+        --security-opt apparmor=unconfined
+        --security-opt label=disable
+        --security-opt seccomp=unconfined
+        --security-opt systempaths=unconfined
+        --cap-add SYS_ADMIN
+        --network=host
+
+        --entrypoint=/ic/ci/container/docker-init.sh # needed to fix up perms on /dev/fuse
+        )
+fi
 
 if [ -f "$HOME/.container-run.conf" ]; then
     # conf file with user's custom PODMAN_RUN_USR_ARGS
@@ -258,8 +290,8 @@ if [ -f "$HOME/.container-run.conf" ]; then
     eprintln "Sourcing user's ~/.container-run.conf"
     tput -T xterm sgr0
     source "$HOME/.container-run.conf"
-    PODMAN_RUN_ARGS+=("${PODMAN_RUN_USR_ARGS[@]}")
+    RUNTIME_RUN_ARGS+=("${PODMAN_RUN_USR_ARGS[@]}")
 fi
 
 set -x
-exec "${CONTAINER_CMD[@]}" run "${PODMAN_RUN_ARGS[@]}" -w "$WORKDIR" "$IMAGE" "${cmd[@]}"
+exec "${CONTAINER_CMD[@]}" run "${RUNTIME_RUN_ARGS[@]}" -w "$WORKDIR" "$IMAGE" "${cmd[@]}"

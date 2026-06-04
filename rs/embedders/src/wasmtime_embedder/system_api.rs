@@ -1279,6 +1279,10 @@ pub struct SystemApiImpl {
 
     /// How many times each tracked System API call was invoked.
     call_counters: SystemApiCallCounters,
+
+    /// Smallest logical stable memory size reached by a successful shrink in
+    /// this execution.
+    min_stable_memory_size_during_execution: Option<NumWasmPages>,
 }
 
 impl SystemApiImpl {
@@ -1334,6 +1338,7 @@ impl SystemApiImpl {
             current_slice_instruction_limit: i64::try_from(slice_limit).unwrap_or(i64::MAX),
             instructions_executed_before_current_slice: 0,
             call_counters: SystemApiCallCounters::default(),
+            min_stable_memory_size_during_execution: None,
         }
     }
 
@@ -1465,6 +1470,10 @@ impl SystemApiImpl {
         self.memory_usage
             .allocated_message_memory
             .guaranteed_response
+    }
+
+    pub fn get_min_stable_memory_size_during_execution(&self) -> Option<NumWasmPages> {
+        self.min_stable_memory_size_during_execution
     }
 
     fn error_for(&self, method_name: &str) -> HypervisorError {
@@ -3640,6 +3649,16 @@ impl SystemApi for SystemApiImpl {
             &self.api_type,
             ExecutionMemoryType::StableMemory,
         )?;
+        if removed_pages > 0 {
+            let new_size = current_size - removed_pages;
+            let new_size = NumWasmPages::new(
+                usize::try_from(new_size).expect("stable memory size does not fit in usize"),
+            );
+            self.min_stable_memory_size_during_execution = Some(
+                self.min_stable_memory_size_during_execution
+                    .map_or(new_size, |current_min| current_min.min(new_size)),
+            );
+        }
         Ok(StableGrowOutcome::Success)
     }
 

@@ -133,6 +133,7 @@ mod tests {
                         page_delta: PageMap::new_for_testing().serialize_delta(&[]),
                         size: NumWasmPages::new(42),
                     },
+                    min_stable_memory_size_during_execution: Some(NumWasmPages::new(7)),
                 }),
                 system_state_modifications: SystemStateModifications::default(),
             },

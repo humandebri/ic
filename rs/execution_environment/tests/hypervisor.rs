@@ -10727,11 +10727,7 @@ fn mix_stable_memory_apis() {
     assert_eq!(get_reply(res), data);
 }
 
-#[test]
-fn stable64_shrink_updates_logical_size_and_zeroes_regrown_tail() {
-    let mut test = ExecutionTestBuilder::new()
-        .with_precompiled_universal_canister(false)
-        .build();
+fn run_stable64_shrink_updates_logical_size_and_zeroes_regrown_tail(test: &mut ExecutionTest) {
     let wat = r#"
         (module
             (import "ic0" "msg_reply" (func $msg_reply))
@@ -10786,6 +10782,25 @@ fn stable64_shrink_updates_logical_size_and_zeroes_regrown_tail() {
         test.ingress(canister_id, "go", vec![]),
         Ok(WasmResult::Reply(vec![]))
     );
+}
+
+#[test]
+fn stable64_shrink_updates_logical_size_and_zeroes_regrown_tail() {
+    let mut test = ExecutionTestBuilder::new()
+        .with_precompiled_universal_canister(false)
+        .build();
+
+    run_stable64_shrink_updates_logical_size_and_zeroes_regrown_tail(&mut test);
+}
+
+#[test]
+fn stable64_shrink_updates_logical_size_and_zeroes_regrown_tail_without_sandboxing() {
+    let mut test = ExecutionTestBuilder::new()
+        .with_precompiled_universal_canister(false)
+        .with_canister_sandboxing_disabled()
+        .build();
+
+    run_stable64_shrink_updates_logical_size_and_zeroes_regrown_tail(&mut test);
 }
 
 #[test]

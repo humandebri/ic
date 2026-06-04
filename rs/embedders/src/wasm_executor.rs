@@ -768,17 +768,25 @@ pub fn process(
                     ));
                     let stable_memory_host_pages =
                         stable_memory.size.get() * WASM_PAGE_SIZE_IN_BYTES / PAGE_SIZE;
-                    if stable_memory.size < old_stable_memory_size {
+                    // unwrap should not fail, because we passed Some(system_api) when creating the instance
+                    let sys_api = instance.store_data().system_api().unwrap();
+                    if let Some(min_stable_memory_size) =
+                        sys_api.get_min_stable_memory_size_during_execution()
+                        && min_stable_memory_size < old_stable_memory_size
+                    {
+                        let stable_memory_storage_limit_pages =
+                            min_stable_memory_size.get() * WASM_PAGE_SIZE_IN_BYTES / PAGE_SIZE;
                         stable_memory
                             .page_map
-                            .limit_storage_to_pages(stable_memory_host_pages);
+                            .limit_storage_to_pages_and_truncate_delta(
+                                stable_memory_storage_limit_pages,
+                                stable_memory_host_pages,
+                            );
                     } else {
                         stable_memory
                             .page_map
                             .truncate_delta_to_pages(stable_memory_host_pages);
                     }
-                    // unwrap should not fail, because we passed Some(system_api) when creating the instance
-                    let sys_api = instance.store_data().system_api().unwrap();
                     allocated_bytes = sys_api.get_allocated_bytes();
                     deallocated_bytes = sys_api.get_deallocated_bytes();
                     allocated_guaranteed_response_message_bytes =

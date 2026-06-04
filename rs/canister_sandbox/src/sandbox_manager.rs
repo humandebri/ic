@@ -189,6 +189,7 @@ impl Execution {
                                 &stable_memory,
                                 &dirty_page_indices.wasm_memory_delta,
                                 &dirty_page_indices.stable_memory_delta,
+                                system_api.get_min_stable_memory_size_during_execution(),
                             )
                         },
                     );

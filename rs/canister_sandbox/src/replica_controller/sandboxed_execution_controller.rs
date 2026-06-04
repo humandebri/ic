@@ -1802,10 +1802,18 @@ impl SandboxedExecutionController {
                 stable_memory.size = execution_state_modifications.stable_memory.size;
                 let stable_memory_host_pages =
                     stable_memory.size.get() * WASM_PAGE_SIZE_IN_BYTES / PAGE_SIZE;
-                if stable_memory.size < old_stable_memory_size {
+                if let Some(min_stable_memory_size) =
+                    execution_state_modifications.min_stable_memory_size_during_execution
+                    && min_stable_memory_size < old_stable_memory_size
+                {
+                    let stable_memory_storage_limit_pages =
+                        min_stable_memory_size.get() * WASM_PAGE_SIZE_IN_BYTES / PAGE_SIZE;
                     stable_memory
                         .page_map
-                        .limit_storage_to_pages(stable_memory_host_pages);
+                        .limit_storage_to_pages_and_truncate_delta(
+                            stable_memory_storage_limit_pages,
+                            stable_memory_host_pages,
+                        );
                 } else {
                     stable_memory
                         .page_map

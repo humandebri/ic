@@ -838,13 +838,17 @@ fn merge_candidates_and_storage_info(
                     .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send>)?;
                 storage_info.disk_size +=
                     (&pm_layout as &dyn StorageLayout).storage_size_bytes()?;
-                let num_pages = (&pm_layout as &dyn StorageLayout).memory_size_pages()?;
-                storage_info.mem_size += (num_pages * PAGE_SIZE) as u64;
+                let physical_num_pages = (&pm_layout as &dyn StorageLayout).memory_size_pages()?;
+                let visible_logical_num_pages =
+                    physical_num_pages.min(page_map_type_with_limit.visible_logical_num_pages);
+                storage_info.mem_size += (visible_logical_num_pages * PAGE_SIZE) as u64;
                 Ok((
                     MergeCandidate::new(
                         &pm_layout,
                         height,
-                        num_pages as u64,
+                        // Merge still scans the physical page range. Storage page limits decide
+                        // which tail pages are visible; accounting uses the logical page count.
+                        physical_num_pages as u64,
                         page_map_type_with_limit.storage_page_limits.clone(),
                         lsmt_config,
                         &metrics.storage_metrics,

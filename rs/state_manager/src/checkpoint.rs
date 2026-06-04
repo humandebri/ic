@@ -188,6 +188,7 @@ pub(crate) enum PageMapType {
 pub(crate) struct PageMapTypeWithLimit {
     pub page_map_type: PageMapType,
     pub storage_page_limits: Vec<StoragePageLimit>,
+    pub visible_logical_num_pages: usize,
 }
 
 impl PageMapType {
@@ -216,11 +217,14 @@ impl PageMapType {
     pub(crate) fn list_all_with_limits(state: &ReplicatedState) -> Vec<PageMapTypeWithLimit> {
         Self::list_all(state)
             .into_iter()
-            .map(|page_map_type| PageMapTypeWithLimit {
-                storage_page_limits: page_map_type
-                    .get(state)
-                    .map_or_else(Vec::new, |page_map| page_map.storage_page_limits().to_vec()),
-                page_map_type,
+            .map(|page_map_type| {
+                let page_map = page_map_type.get(state);
+                PageMapTypeWithLimit {
+                    storage_page_limits: page_map
+                        .map_or_else(Vec::new, |page_map| page_map.storage_page_limits().to_vec()),
+                    visible_logical_num_pages: page_map.map_or(0, PageMap::num_host_pages),
+                    page_map_type,
+                }
             })
             .collect()
     }
@@ -308,19 +312,23 @@ pub(crate) fn flush_checkpoint_ops_and_page_maps(
             None
         };
 
-        // Ensure that we call `strip_unflushed_delta()` iff we need to.
-        debug_assert_eq!(
-            truncate || page_map_clone.is_some(),
-            page_map.should_flush()
+        let should_flush = page_map.should_flush();
+
+        // Storage page limit metadata can require a checkpoint flush even when
+        // no page delta needs to be written.
+        debug_assert!(
+            should_flush || (!truncate && page_map_clone.is_none()),
+            "a page map with files to truncate or deltas to write must be flushed"
         );
 
-        if truncate || page_map_clone.is_some() {
+        if should_flush {
             pagemaps.push(PageMapToFlush {
                 page_map_type: entry,
                 truncate,
                 page_map: page_map_clone,
             });
-            // Clear the unflushed delta, and mark the page map as being backed by storage.
+            // Clear the unflushed delta, mark the page map as being backed by storage,
+            // and materialize pending storage page limits at this checkpoint height.
             page_map.strip_unflushed_delta(height);
         }
     };

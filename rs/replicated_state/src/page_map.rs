@@ -871,13 +871,22 @@ impl PageMap {
         std::mem::take(&mut self.unflushed_delta);
     }
 
+    fn has_pending_storage_page_limit(&self) -> bool {
+        self.storage_page_limits
+            .iter()
+            .any(|limit| limit.valid_storage_from_height.is_none())
+    }
+
     /// Returns `true` if flushing the page map would result in truncating the
-    /// underlying files and/or persisting (non-empty) unflushed delta.
+    /// underlying files, persisting a non-empty unflushed delta, and/or
+    /// materializing pending storage page limit metadata.
     ///
     /// If `true`, calling `strip_unflushed_delta()` will actually mutate the
     /// `PageMap`; if `false`, the call would be a no-op.
     pub fn should_flush(&self) -> bool {
-        !self.has_files_in_tip || !self.unflushed_delta.is_empty()
+        !self.has_files_in_tip
+            || !self.unflushed_delta.is_empty()
+            || self.has_pending_storage_page_limit()
     }
 
     pub fn get_page_delta_indices(&self) -> Vec<PageIndex> {
@@ -934,15 +943,23 @@ impl PageMap {
         self.unflushed_delta.truncate(max_pages);
     }
 
-    /// Makes checkpoint-backed pages above `max_pages` read as zeros until
-    /// storage written after this shrink supersedes them.
     pub fn limit_storage_to_pages(&mut self, max_pages: usize) {
+        self.limit_storage_to_pages_and_truncate_delta(max_pages, max_pages);
+    }
+
+    /// Makes checkpoint-backed pages above `storage_max_pages` read as zeros,
+    /// while preserving in-memory deltas below `delta_max_pages`.
+    pub fn limit_storage_to_pages_and_truncate_delta(
+        &mut self,
+        storage_max_pages: usize,
+        delta_max_pages: usize,
+    ) {
         self.storage_page_limits.push(StoragePageLimit {
-            max_pages,
+            max_pages: storage_max_pages,
             valid_storage_from_height: None,
         });
         Self::compact_storage_page_limits(&mut self.storage_page_limits);
-        self.truncate_delta_to_pages(max_pages);
+        self.truncate_delta_to_pages(delta_max_pages);
     }
 
     fn compact_storage_page_limits(storage_page_limits: &mut Vec<StoragePageLimit>) {

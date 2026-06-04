@@ -83,6 +83,10 @@ pub struct ExecutionStateModifications {
 
     /// Modifications in the stable memory.
     pub stable_memory: MemoryModifications,
+
+    /// Smallest logical stable memory size reached by a successful shrink in
+    /// this execution.
+    pub min_stable_memory_size_during_execution: Option<NumWasmPages>,
 }
 
 impl ExecutionStateModifications {
@@ -92,6 +96,7 @@ impl ExecutionStateModifications {
         stable_memory: &Memory,
         wasm_memory_delta: &[PageIndex],
         stable_memory_delta: &[PageIndex],
+        min_stable_memory_size_during_execution: Option<NumWasmPages>,
     ) -> Self {
         let wasm_memory = MemoryModifications {
             page_delta: wasm_memory.page_map.serialize_delta(wasm_memory_delta),
@@ -107,6 +112,7 @@ impl ExecutionStateModifications {
             globals,
             wasm_memory,
             stable_memory,
+            min_stable_memory_size_during_execution,
         }
     }
 }

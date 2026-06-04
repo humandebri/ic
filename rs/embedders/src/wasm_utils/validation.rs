@@ -15,6 +15,7 @@ use std::{
     num::NonZero,
 };
 
+use crate::wasm_utils::instrumentation::STABLE_MEMORY_SIZE_GLOBAL_NAME;
 use crate::wasmtime_embedder::{
     STABLE_BYTEMAP_MEMORY_NAME, STABLE_MEMORY_NAME, WASM_HEAP_MEMORY_NAME,
 };
@@ -42,11 +43,12 @@ use crate::WASM_PAGE_SIZE;
 
 /// Symbols that are reserved and cannot be exported by canisters.
 #[doc(hidden)] // pub for usage in tests
-pub const RESERVED_SYMBOLS: [&str; 6] = [
+pub const RESERVED_SYMBOLS: [&str; 7] = [
     "canister counter_instructions",
     "canister_start",
     DIRTY_PAGES_COUNTER_GLOBAL_NAME,
     ACCESSED_PAGES_COUNTER_GLOBAL_NAME,
+    STABLE_MEMORY_SIZE_GLOBAL_NAME,
     STABLE_MEMORY_NAME,
     STABLE_BYTEMAP_MEMORY_NAME,
 ];
@@ -516,6 +518,16 @@ fn get_valid_system_apis_common(
         ),
         (
             "stable64_grow",
+            vec![(
+                API_VERSION_IC0,
+                FunctionSignature {
+                    param_types: vec![DataType::I64],
+                    return_type: vec![DataType::I64],
+                },
+            )],
+        ),
+        (
+            "stable64_shrink",
             vec![(
                 API_VERSION_IC0,
                 FunctionSignature {

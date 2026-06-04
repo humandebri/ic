@@ -12,7 +12,7 @@ use ic_replicated_state::{
     CanisterMetrics, CanisterState, CanisterStates, ExecutionState, ReplicatedState,
     SchedulerState, SystemState,
     canister_state::execution_state::{WasmBinary, WasmExecutionMode},
-    page_map::PageMap,
+    page_map::{PageMap, StoragePageLimit},
 };
 use ic_replicated_state::{CheckpointLoadingMetrics, Memory};
 use ic_state_layout::{
@@ -184,6 +184,12 @@ pub(crate) enum PageMapType {
     SnapshotWasmChunkStore(SnapshotId),
 }
 
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub(crate) struct PageMapTypeWithLimit {
+    pub page_map_type: PageMapType,
+    pub storage_page_limits: Vec<StoragePageLimit>,
+}
+
 impl PageMapType {
     /// List all PageMaps contained in `state`.
     pub(crate) fn list_all(state: &ReplicatedState) -> Vec<PageMapType> {
@@ -205,6 +211,18 @@ impl PageMapType {
         }
 
         result
+    }
+
+    pub(crate) fn list_all_with_limits(state: &ReplicatedState) -> Vec<PageMapTypeWithLimit> {
+        Self::list_all(state)
+            .into_iter()
+            .map(|page_map_type| PageMapTypeWithLimit {
+                storage_page_limits: page_map_type
+                    .get(state)
+                    .map_or_else(Vec::new, |page_map| page_map.storage_page_limits().to_vec()),
+                page_map_type,
+            })
+            .collect()
     }
 
     /// The layout of the files on disk for this PageMap.
@@ -303,7 +321,7 @@ pub(crate) fn flush_checkpoint_ops_and_page_maps(
                 page_map: page_map_clone,
             });
             // Clear the unflushed delta, and mark the page map as being backed by storage.
-            page_map.strip_unflushed_delta();
+            page_map.strip_unflushed_delta(height);
         }
     };
 
@@ -753,10 +771,13 @@ pub fn load_canister_state(
 
             let starting_time = Instant::now();
             let stable_memory_layout = canister_layout.stable_memory();
-            let stable_memory = Memory::new(
+            let mut stable_memory = Memory::new(
                 PageMap::open(Box::new(stable_memory_layout), Arc::clone(&fd_factory))?,
                 canister_state_bits.stable_memory_size,
             );
+            stable_memory
+                .page_map
+                .set_storage_page_limits(canister_state_bits.stable_memory_storage_page_limits);
             durations.insert("stable_memory", starting_time.elapsed());
 
             let starting_time = Instant::now();
@@ -950,10 +971,13 @@ pub fn load_snapshot(
 
         let starting_time = Instant::now();
         let stable_memory_layout = snapshot_layout.stable_memory();
-        let stable_memory = PageMemory {
+        let mut stable_memory = PageMemory {
             page_map: PageMap::open(Box::new(stable_memory_layout), Arc::clone(&fd_factory))?,
             size: canister_snapshot_bits.stable_memory_size,
         };
+        stable_memory
+            .page_map
+            .set_storage_page_limits(canister_snapshot_bits.stable_memory_storage_page_limits);
         durations.insert("snapshot_stable_memory", starting_time.elapsed());
 
         let starting_time = Instant::now();

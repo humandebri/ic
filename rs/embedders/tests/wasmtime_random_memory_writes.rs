@@ -804,7 +804,7 @@ mod tests {
         fn setup_instruction_overhead() -> u64 {
             instruction_to_cost(&wirm::wasmparser::Operator::Drop, WasmMemoryType::Wasm32)
                 + instruction_to_cost(&wirm::wasmparser::Operator::Call { function_index: 0 }, WasmMemoryType::Wasm32)
-                + ic_embedders::wasmtime_embedder::system_api_complexity::overhead_native::STABLE_GROW.get()
+                + ic_embedders::wasmtime_embedder::system_api_complexity::overhead_native::STABLE_GROW_OR_SHRINK.get()
                 + instruction_to_cost(&wirm::wasmparser::Operator::I32Const { value: 1 }, WasmMemoryType::Wasm32)
                 + instruction_to_cost(&wirm::wasmparser::Operator::Call { function_index: 0 }, WasmMemoryType::Wasm32)
                 + 3 * instruction_to_cost(&wirm::wasmparser::Operator::I32Const { value: 1 }, WasmMemoryType::Wasm32)

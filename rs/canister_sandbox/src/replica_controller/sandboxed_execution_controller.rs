@@ -23,12 +23,13 @@ use ic_logger::warn;
 use ic_logger::{ReplicaLogger, error, info};
 use ic_metrics::MetricsRegistry;
 use ic_metrics::buckets::{decimal_buckets_with_zero, exponential_buckets};
+use ic_replicated_state::canister_state::WASM_PAGE_SIZE_IN_BYTES;
 use ic_replicated_state::canister_state::execution_state::{
     SandboxMemory, SandboxMemoryHandle, SandboxMemoryOwner, WasmBinary, WasmExecutionMode,
 };
 use ic_replicated_state::{
     EmbedderCache, ExecutionState, ExportedFunctions, Memory, PageMap, ReplicatedState,
-    page_map::allocated_pages_count,
+    page_map::{PAGE_SIZE, allocated_pages_count},
 };
 use ic_types::ingress::WasmResult;
 use ic_types::methods::{FuncRef, WasmMethod};
@@ -1794,10 +1795,22 @@ impl SandboxedExecutionController {
                         .inc();
                 }
                 let mut stable_memory = execution_state.stable_memory.clone();
+                let old_stable_memory_size = stable_memory.size;
                 stable_memory
                     .page_map
                     .deserialize_delta(execution_state_modifications.stable_memory.page_delta);
                 stable_memory.size = execution_state_modifications.stable_memory.size;
+                let stable_memory_host_pages =
+                    stable_memory.size.get() * WASM_PAGE_SIZE_IN_BYTES / PAGE_SIZE;
+                if stable_memory.size < old_stable_memory_size {
+                    stable_memory
+                        .page_map
+                        .limit_storage_to_pages(stable_memory_host_pages);
+                } else {
+                    stable_memory
+                        .page_map
+                        .truncate_delta_to_pages(stable_memory_host_pages);
+                }
                 stable_memory.sandbox_memory = SandboxMemory::synced(wrap_remote_memory(
                     &sandbox_process,
                     next_stable_memory_id,

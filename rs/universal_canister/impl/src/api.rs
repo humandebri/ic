@@ -58,6 +58,7 @@ mod ic0 {
         pub fn stable_write(offset: u32, src: u32, size: u32) -> ();
         pub fn stable64_size() -> u64;
         pub fn stable64_grow(additional_pages: u64) -> u64;
+        pub fn stable64_shrink(removed_pages: u64) -> u64;
         pub fn stable64_read(dst: u64, offset: u64, size: u64) -> ();
         pub fn stable64_write(offset: u64, src: u64, size: u64) -> ();
         pub fn root_key_size() -> u32;
@@ -356,6 +357,10 @@ pub fn stable_grow(additional_pages: u32) -> u32 {
 
 pub fn stable64_grow(additional_pages: u64) -> u64 {
     unsafe { ic0::stable64_grow(additional_pages) }
+}
+
+pub fn stable64_shrink(removed_pages: u64) -> u64 {
+    unsafe { ic0::stable64_shrink(removed_pages) }
 }
 
 pub fn stable_read(offset: u32, size: u32) -> Vec<u8> {

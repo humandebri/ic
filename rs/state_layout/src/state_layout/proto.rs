@@ -7,6 +7,20 @@ use ic_protobuf::{
     },
 };
 
+fn storage_page_limit_to_pb(limit: StoragePageLimit) -> pb_canister_state_bits::StoragePageLimit {
+    pb_canister_state_bits::StoragePageLimit {
+        max_pages: limit.max_pages as u64,
+        valid_storage_from_height: limit.valid_storage_from_height.map(|height| height.get()),
+    }
+}
+
+fn storage_page_limit_from_pb(limit: pb_canister_state_bits::StoragePageLimit) -> StoragePageLimit {
+    StoragePageLimit {
+        max_pages: limit.max_pages as usize,
+        valid_storage_from_height: limit.valid_storage_from_height.map(Height::new),
+    }
+}
+
 impl From<CanisterStateBits> for pb_canister_state_bits::CanisterStateBits {
     fn from(item: CanisterStateBits) -> Self {
         Self {
@@ -32,6 +46,11 @@ impl From<CanisterStateBits> for pb_canister_state_bits::CanisterStateBits {
             certified_data: item.certified_data.clone(),
             consumed_cycles: Some((&item.consumed_cycles).into()),
             stable_memory_size64: item.stable_memory_size.get() as u64,
+            stable_memory_storage_page_limits: item
+                .stable_memory_storage_page_limits
+                .into_iter()
+                .map(storage_page_limit_to_pb)
+                .collect(),
             heap_delta_debit: item.heap_delta_debit.get(),
             install_code_debit: item.install_code_debit.get(),
             time_of_last_allocation_charge_nanos: Some(item.time_of_last_allocation_charge_nanos),
@@ -182,6 +201,11 @@ impl TryFrom<pb_canister_state_bits::CanisterStateBits> for CanisterStateBits {
             certified_data: value.certified_data,
             consumed_cycles,
             stable_memory_size: NumWasmPages::from(value.stable_memory_size64 as usize),
+            stable_memory_storage_page_limits: value
+                .stable_memory_storage_page_limits
+                .into_iter()
+                .map(storage_page_limit_from_pb)
+                .collect(),
             heap_delta_debit: NumBytes::from(value.heap_delta_debit),
             install_code_debit: NumInstructions::from(value.install_code_debit),
             time_of_last_allocation_charge_nanos: try_from_option_field(
@@ -317,6 +341,11 @@ impl From<CanisterSnapshotBits> for pb_canister_snapshot_bits::CanisterSnapshotB
             certified_data: item.certified_data.clone(),
             wasm_chunk_store_metadata: Some((&item.wasm_chunk_store_metadata).into()),
             stable_memory_size: item.stable_memory_size.get() as u64,
+            stable_memory_storage_page_limits: item
+                .stable_memory_storage_page_limits
+                .into_iter()
+                .map(storage_page_limit_to_pb)
+                .collect(),
             wasm_memory_size: item.wasm_memory_size.get() as u64,
             total_size: item.total_size.get(),
             exported_globals: item
@@ -379,6 +408,11 @@ impl TryFrom<pb_canister_snapshot_bits::CanisterSnapshotBits> for CanisterSnapsh
             )
             .unwrap_or_default(),
             stable_memory_size: NumWasmPages::from(item.stable_memory_size as usize),
+            stable_memory_storage_page_limits: item
+                .stable_memory_storage_page_limits
+                .into_iter()
+                .map(storage_page_limit_from_pb)
+                .collect(),
             wasm_memory_size: NumWasmPages::from(item.wasm_memory_size as usize),
             total_size: NumBytes::from(item.total_size),
             exported_globals,

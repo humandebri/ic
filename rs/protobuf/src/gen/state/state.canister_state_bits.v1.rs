@@ -645,7 +645,14 @@ pub struct TaskQueue {
     #[prost(message, repeated, tag = "3")]
     pub queue: ::prost::alloc::vec::Vec<ExecutionTask>,
 }
-/// Next ID: 68
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct StoragePageLimit {
+    #[prost(uint64, tag = "1")]
+    pub max_pages: u64,
+    #[prost(uint64, optional, tag = "2")]
+    pub valid_storage_from_height: ::core::option::Option<u64>,
+}
+/// Next ID: 69
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CanisterStateBits {
     #[prost(uint64, tag = "4")]
@@ -776,6 +783,10 @@ pub struct CanisterStateBits {
     /// Snapshot visibility for the canister.
     #[prost(message, optional, tag = "64")]
     pub snapshot_visibility: ::core::option::Option<SnapshotVisibility>,
+    /// Stable memory shrink generations that decide which checkpoint tail pages
+    /// remain visible.
+    #[prost(message, repeated, tag = "68")]
+    pub stable_memory_storage_page_limits: ::prost::alloc::vec::Vec<StoragePageLimit>,
     #[prost(oneof = "canister_state_bits::CanisterStatus", tags = "11, 12, 13")]
     pub canister_status: ::core::option::Option<canister_state_bits::CanisterStatus>,
 }

@@ -35,6 +35,7 @@ use ic_types_cycles::{
 };
 use ic_utils::deterministic_operations::deterministic_copy_from_slice;
 use ic_wasm_types::doc_ref;
+use num_traits::SaturatingSub;
 use request_in_prep::{RequestInPrep, into_request};
 use sandbox_safe_system_state::{
     ConsumedCyclesDuringExecution, SandboxSafeSystemState, SystemStateModifications,
@@ -945,6 +946,9 @@ struct MemoryUsage {
     /// the memory allocation of the canister.
     allocated_execution_memory: NumBytes,
 
+    /// Execution memory deallocated during this message execution.
+    deallocated_execution_memory: NumBytes,
+
     /// Message memory allocated during this message execution.
     allocated_message_memory: MessageMemoryUsage,
 
@@ -970,6 +974,7 @@ impl MemoryUsage {
             current_message_usage,
             subnet_available_memory,
             allocated_execution_memory: NumBytes::new(0),
+            deallocated_execution_memory: NumBytes::new(0),
             allocated_message_memory: MessageMemoryUsage::ZERO,
             memory_allocation,
         }
@@ -1098,6 +1103,50 @@ impl MemoryUsage {
                 add_memory(&mut self.stable_memory_usage, execution_bytes)
             }
         }
+    }
+
+    fn deallocate_execution_memory(
+        &mut self,
+        usage_decrease_bytes: NumBytes,
+        api_type: &ApiType,
+        execution_memory_type: ExecutionMemoryType,
+    ) -> HypervisorResult<()> {
+        let new_usage = self
+            .current_usage
+            .get()
+            .checked_sub(usage_decrease_bytes.get())
+            .ok_or_else(|| HypervisorError::ToolchainContractViolation {
+                error: "stable memory shrink exceeds current memory usage".to_string(),
+            })?;
+        let old_allocated_bytes = self.memory_allocation.allocated_bytes(self.current_usage);
+        let new_allocated_bytes = self
+            .memory_allocation
+            .allocated_bytes(NumBytes::new(new_usage));
+        debug_assert!(new_allocated_bytes <= old_allocated_bytes);
+        let deallocated_bytes = old_allocated_bytes - new_allocated_bytes;
+
+        if api_type.should_update_available_memory_and_reserved_cycles() {
+            self.subnet_available_memory.increment(
+                deallocated_bytes,
+                NumBytes::new(0),
+                NumBytes::new(0),
+            );
+        }
+        self.deallocated_execution_memory += deallocated_bytes;
+
+        self.current_usage = NumBytes::new(new_usage);
+        match execution_memory_type {
+            ExecutionMemoryType::WasmMemory => {
+                self.wasm_memory_usage =
+                    self.wasm_memory_usage.saturating_sub(&usage_decrease_bytes)
+            }
+            ExecutionMemoryType::StableMemory => {
+                self.stable_memory_usage = self
+                    .stable_memory_usage
+                    .saturating_sub(&usage_decrease_bytes)
+            }
+        }
+        Ok(())
     }
 
     /// Tries to allocate the requested amount of message memory.
@@ -1405,6 +1454,10 @@ impl SystemApiImpl {
     /// the memory allocation of the canister.
     pub fn get_allocated_bytes(&self) -> NumBytes {
         self.memory_usage.allocated_execution_memory
+    }
+
+    pub fn get_deallocated_bytes(&self) -> NumBytes {
+        self.memory_usage.deallocated_execution_memory
     }
 
     /// Bytes used by or reserved for for guaranteed response messages.
@@ -3567,6 +3620,27 @@ impl SystemApi for SystemApiImpl {
             }
             Err(_) => Ok(StableGrowOutcome::Failure),
         }
+    }
+
+    fn try_shrink_stable_memory(
+        &mut self,
+        current_size: u64,
+        removed_pages: u64,
+    ) -> HypervisorResult<StableGrowOutcome> {
+        if removed_pages > current_size {
+            return Ok(StableGrowOutcome::Failure);
+        }
+        let Ok(execution_bytes) =
+            ic_replicated_state::num_bytes_try_from(NumWasmPages::new(removed_pages as usize))
+        else {
+            return Ok(StableGrowOutcome::Failure);
+        };
+        self.memory_usage.deallocate_execution_memory(
+            execution_bytes,
+            &self.api_type,
+            ExecutionMemoryType::StableMemory,
+        )?;
+        Ok(StableGrowOutcome::Success)
     }
 
     fn ic0_canister_cycle_balance(&mut self) -> HypervisorResult<u64> {

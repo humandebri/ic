@@ -687,7 +687,7 @@ fn make_canister_state_with_no_page_map_delta() -> CanisterState {
         .system_state
         .wasm_chunk_store
         .page_map_mut()
-        .strip_unflushed_delta();
+        .strip_unflushed_delta(Height::new(0));
     canister_state
 }
 
@@ -908,7 +908,7 @@ fn flush_checkpoint_ops_and_page_maps_handles_mixed_canisters() {
         .system_state
         .wasm_chunk_store
         .page_map_mut()
-        .strip_unflushed_delta();
+        .strip_unflushed_delta(Height::new(0));
 
     let mut dirty_canister = new_canister_state(
         dirty_id,

@@ -109,6 +109,7 @@ mod tests {
                 wasm_result: Ok(Some(wasm_result)),
                 num_instructions_left: NumInstructions::new(1),
                 allocated_bytes: NumBytes::new(1000),
+                deallocated_bytes: NumBytes::new(0),
                 allocated_guaranteed_response_message_bytes: NumBytes::new(2000),
                 new_memory_usage: Some(NumBytes::new(2000)),
                 new_message_memory_usage: Some(new_message_memory_usage),

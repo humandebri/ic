@@ -118,6 +118,41 @@ fn vmemory_size(canister_layout: &ic_state_layout::CanisterLayout<ReadOnly>) -> 
         + std::fs::metadata(canister_layout.vmemory_0().base()).map_or(0, |metadata| metadata.len())
 }
 
+fn update_stable_memory_pages(
+    state: &mut ReplicatedState,
+    canister_id: CanisterId,
+    wasm_pages: NumWasmPages,
+    pages: &[(u64, u8)],
+) {
+    let canister = state.canister_state_make_mut(&canister_id).unwrap();
+    let stable_memory = &mut canister.execution_state.as_mut().unwrap().stable_memory;
+    stable_memory.size = wasm_pages;
+    for (page_index, byte) in pages {
+        let contents = [*byte; PAGE_SIZE];
+        stable_memory
+            .page_map
+            .update(&[(PageIndex::from(*page_index), &contents)]);
+    }
+}
+
+fn assert_stable_memory_page(
+    state: &ReplicatedState,
+    canister_id: CanisterId,
+    page_index: u64,
+    expected_byte: u8,
+) {
+    let page = state
+        .canister_state(&canister_id)
+        .unwrap()
+        .execution_state
+        .as_ref()
+        .unwrap()
+        .stable_memory
+        .page_map
+        .get_page(PageIndex::from(page_index));
+    assert_eq!(page, &[expected_byte; PAGE_SIZE]);
+}
+
 /// Combined size of stable memory including overlays.
 fn stable_memory_size(canister_layout: &ic_state_layout::CanisterLayout<ReadOnly>) -> u64 {
     canister_layout
@@ -698,6 +733,98 @@ fn tip_can_be_recovered_from_latest_checkpoint() {
         let (height, recovered_tip) = state_manager.take_tip();
         assert_eq!(height, Height(2));
         assert_eq!(canister_ids(&recovered_tip), canister_id);
+    });
+}
+
+#[test]
+fn stable_memory_storage_page_limit_survives_tip_merge_and_checkpoint_reload() {
+    state_manager_restart_test(|state_manager, restart_fn| {
+        let canister_id = canister_test_id(10);
+
+        let (height, mut state) = state_manager.take_tip();
+        assert_eq!(height, Height(0));
+        insert_dummy_canister(&mut state, canister_id);
+        update_stable_memory_pages(
+            &mut state,
+            canister_id,
+            NumWasmPages::new(2),
+            &[
+                (0, 1),
+                (1, 1),
+                (2, 1),
+                (3, 1),
+                (4, 1),
+                (5, 1),
+                (6, 1),
+                (7, 1),
+                (8, 1),
+                (9, 1),
+            ],
+        );
+        state_manager.commit_and_certify_at_height_sync(
+            state,
+            Height(1),
+            CertificationScope::Full,
+            None,
+        );
+        wait_for_checkpoint(&state_manager, Height(1));
+
+        let (height, mut state) = state_manager.take_tip();
+        assert_eq!(height, Height(1));
+        {
+            let canister = state.canister_state_make_mut(&canister_id).unwrap();
+            let stable_memory = &mut canister.execution_state.as_mut().unwrap().stable_memory;
+            stable_memory.size = NumWasmPages::new(1);
+            stable_memory.page_map.limit_storage_to_pages(8);
+        }
+        state_manager.commit_and_certify_at_height_sync(
+            state,
+            Height(2),
+            CertificationScope::Full,
+            None,
+        );
+        wait_for_checkpoint(&state_manager, Height(2));
+
+        let (height, mut state) = state_manager.take_tip();
+        assert_eq!(height, Height(2));
+        update_stable_memory_pages(
+            &mut state,
+            canister_id,
+            NumWasmPages::new(2),
+            &[(8, 2), (9, 2)],
+        );
+        state_manager.commit_and_certify_at_height_sync(
+            state,
+            Height(3),
+            CertificationScope::Full,
+            None,
+        );
+        wait_for_checkpoint(&state_manager, Height(3));
+
+        let (height, mut state) = state_manager.take_tip();
+        assert_eq!(height, Height(3));
+        {
+            let canister = state.canister_state_make_mut(&canister_id).unwrap();
+            let stable_memory = &mut canister.execution_state.as_mut().unwrap().stable_memory;
+            stable_memory.size = NumWasmPages::new(1);
+            stable_memory.page_map.limit_storage_to_pages(9);
+        }
+        state_manager.commit_and_certify_at_height_sync(
+            state,
+            Height(4),
+            CertificationScope::Full,
+            None,
+        );
+        wait_for_checkpoint(&state_manager, Height(4));
+
+        let state_manager = restart_fn(state_manager, Some(Height(4)));
+        let (height, recovered_state) = state_manager.take_tip();
+        assert_eq!(height, Height(4));
+
+        assert_stable_memory_page(&recovered_state, canister_id, 0, 1);
+        assert_stable_memory_page(&recovered_state, canister_id, 7, 1);
+        assert_stable_memory_page(&recovered_state, canister_id, 8, 2);
+        assert_stable_memory_page(&recovered_state, canister_id, 9, 0);
     });
 }
 

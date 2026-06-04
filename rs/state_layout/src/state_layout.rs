@@ -15,7 +15,7 @@ use ic_replicated_state::{
         execution_state::{NextScheduledMethod, WasmMetadata},
         system_state::{CanisterHistory, TaskQueue, wasm_chunk_store::WasmChunkStoreMetadata},
     },
-    page_map::{Shard, StorageLayout, StorageResult},
+    page_map::{Shard, StorageLayout, StoragePageLimit, StorageResult},
 };
 use ic_sys::{fs::sync_path, mmap::ScopedMmap};
 use ic_types::{
@@ -184,6 +184,7 @@ pub struct CanisterStateBits {
     pub certified_data: Vec<u8>,
     pub consumed_cycles: NominalCycles,
     pub stable_memory_size: NumWasmPages,
+    pub stable_memory_storage_page_limits: Vec<StoragePageLimit>,
     pub heap_delta_debit: NumBytes,
     pub install_code_debit: NumInstructions,
     pub time_of_last_allocation_charge_nanos: u64,
@@ -231,6 +232,7 @@ pub struct CanisterSnapshotBits {
     pub wasm_chunk_store_metadata: WasmChunkStoreMetadata,
     /// The size of the stable memory in pages.
     pub stable_memory_size: NumWasmPages,
+    pub stable_memory_storage_page_limits: Vec<StoragePageLimit>,
     /// The size of the wasm memory in pages.
     pub wasm_memory_size: NumWasmPages,
     /// The total size of the snapshot in bytes.

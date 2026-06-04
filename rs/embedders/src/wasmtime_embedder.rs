@@ -38,7 +38,7 @@ use signal_stack::WasmtimeSignalStack;
 
 use crate::wasm_utils::instrumentation::{
     ACCESSED_PAGES_COUNTER_GLOBAL_NAME, DIRTY_PAGES_COUNTER_GLOBAL_NAME,
-    INSTRUCTIONS_COUNTER_GLOBAL_NAME, WasmMemoryType,
+    INSTRUCTIONS_COUNTER_GLOBAL_NAME, STABLE_MEMORY_SIZE_GLOBAL_NAME, WasmMemoryType,
 };
 use crate::{
     serialized_module::SerializedModuleBytes, wasm_utils::validation::wasmtime_validation_config,
@@ -165,6 +165,7 @@ fn get_exported_globals<T>(instance: &Instance, store: &mut Store<T>) -> Vec<was
     const TO_IGNORE: &[&str] = &[
         DIRTY_PAGES_COUNTER_GLOBAL_NAME,
         ACCESSED_PAGES_COUNTER_GLOBAL_NAME,
+        STABLE_MEMORY_SIZE_GLOBAL_NAME,
     ];
 
     instance
@@ -577,6 +578,14 @@ impl WasmtimeEmbedder {
             )
             .set(&mut store, Val::I64(current_accessed_limit.get() as i64))
             .expect("Couldn't set dirty page counter global");
+        instance
+            .get_global(&mut store, STABLE_MEMORY_SIZE_GLOBAL_NAME)
+            .expect(
+                "Stable memory size global should have been added \
+                with native stable memory enabled.",
+            )
+            .set(&mut store, Val::I64(stable_memory.size.get() as i64))
+            .expect("Couldn't set stable memory size global");
 
         let mut memories = HashMap::new();
         for mem_info in self.list_memory_infos(modification_tracking, heap_memory, stable_memory) {
@@ -1353,6 +1362,14 @@ impl WasmtimeInstance {
     /// Returns the heap size.
     /// Result is guaranteed to fit in a `u32`.
     pub fn heap_size(&mut self, canister_memory_type: CanisterMemoryType) -> NumWasmPages {
+        if matches!(canister_memory_type, CanisterMemoryType::Stable)
+            && let Some(global) = self
+                .instance
+                .get_global(&mut *self.store, STABLE_MEMORY_SIZE_GLOBAL_NAME)
+            && let Some(size) = global.get(&mut *self.store).i64()
+        {
+            return NumWasmPages::from(size as usize);
+        }
         let name = match canister_memory_type {
             CanisterMemoryType::Heap => WASM_HEAP_MEMORY_NAME,
             CanisterMemoryType::Stable => STABLE_MEMORY_NAME,

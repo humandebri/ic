@@ -1668,6 +1668,7 @@ fn query_cache_future_proof_test() {
         | SystemApiCallId::SubnetSelfSize
         | SystemApiCallId::SubnetSelfCopy
         | SystemApiCallId::Stable64Grow
+        | SystemApiCallId::Stable64Shrink
         | SystemApiCallId::Stable64Read
         | SystemApiCallId::Stable64Size
         | SystemApiCallId::Stable64Write

@@ -5,11 +5,13 @@ use std::{
     io::Write,
     os::{fd::FromRawFd, unix::prelude::FileExt},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crate::page_map::{
     FileDescriptor, MAX_NUMBER_OF_FILES, MemoryInstructions, MemoryMapOrData, PageAllocator,
-    PageDelta, PageMap, PersistenceError, StorageMetrics,
+    PageDelta, PageMap, PersistenceError, StorageMetrics, StoragePageLimit,
+    TestPageAllocatorFileDescriptorImpl,
     storage::{
         CURRENT_OVERLAY_VERSION, Checkpoint, FileIndex, MergeCandidate, MergeDestination,
         OverlayFile, PAGE_INDEX_RANGE_NUM_BYTES, PageIndexRange, SIZE_NUM_BYTES, Shard, Storage,
@@ -318,7 +320,7 @@ fn storage_as_buffer(storage: &Storage) -> Vec<u8> {
     );
     apply_memory_instructions(storage.get_base_memory_instructions(), &mut result);
     apply_memory_instructions(
-        storage.get_memory_instructions(full_range.clone(), &mut filter),
+        storage.get_memory_instructions(full_range.clone(), &mut filter, None),
         &mut result,
     );
     result
@@ -443,6 +445,14 @@ fn merge_assert_num_files(
     }
 }
 
+fn merge_overlay_paths(merge: &MergeCandidate) -> Vec<PathBuf> {
+    merge
+        .overlays
+        .iter()
+        .map(|overlay| overlay.path.clone())
+        .collect()
+}
+
 /// An instruction to modify a storage.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "fuzzing_code", derive(Arbitrary))]
@@ -559,7 +569,7 @@ fn write_overlays_and_verify_with_tempdir(
                 );
 
                 let merges = if *is_downgrade {
-                    MergeCandidate::merge_to_base(&storage_layout, num_pages)
+                    MergeCandidate::merge_to_base(&storage_layout, num_pages, Vec::new())
                         .unwrap()
                         .into_iter()
                         .collect::<Vec<_>>()
@@ -568,6 +578,7 @@ fn write_overlays_and_verify_with_tempdir(
                         &storage_layout,
                         Height::from(round as u64),
                         num_pages,
+                        Vec::new(),
                         lsmt_config,
                         &metrics,
                     )
@@ -577,10 +588,10 @@ fn write_overlays_and_verify_with_tempdir(
                 let merged_overlays: Vec<(Shard, OverlayFile)> = merges
                     .iter()
                     .flat_map(|m| {
-                        m.overlays.iter().map(|path| {
+                        m.overlays.iter().map(|overlay| {
                             (
-                                storage_layout.overlay_shard(path).unwrap(),
-                                OverlayFile::load(path).unwrap(),
+                                storage_layout.overlay_shard(&overlay.path).unwrap(),
+                                OverlayFile::load(&overlay.path).unwrap(),
                             )
                         })
                     })
@@ -915,6 +926,7 @@ fn wrong_shard_pages_is_an_error() {
         },
         Height::from(0),
         9, /* num_pages */
+        Vec::new(),
         &LsmtConfig { shard_num_pages: 3 },
         &StorageMetrics::new(&MetricsRegistry::new()),
     )
@@ -1025,6 +1037,7 @@ fn test_make_merge_candidates_on_empty_dir() {
         },
         Height::from(0),
         0, /* num_pages */
+        Vec::new(),
         &lsmt_config_unsharded(),
         &StorageMetrics::new(&MetricsRegistry::new()),
     )
@@ -1051,6 +1064,7 @@ fn test_make_none_merge_candidate() {
         },
         Height::from(0),
         10, /* num_pages */
+        Vec::new(),
         &lsmt_config_unsharded(),
         &StorageMetrics::new(&MetricsRegistry::new()),
     )
@@ -1088,6 +1102,7 @@ fn test_make_merge_candidates_to_overlay() {
         },
         Height::from(3),
         40, /* num_pages */
+        Vec::new(),
         &lsmt_config,
         &StorageMetrics::new(&MetricsRegistry::new()),
     )
@@ -1098,7 +1113,10 @@ fn test_make_merge_candidates_to_overlay() {
         MergeDestination::SingleShardOverlay(tempdir.path().join("000003_000_vmemory_0.overlay"))
     );
     assert!(merge_candidates[0].base.is_none());
-    assert_eq!(merge_candidates[0].overlays, storage_files.overlays[3..5]);
+    assert_eq!(
+        merge_overlay_paths(&merge_candidates[0]),
+        storage_files.overlays[3..5]
+    );
     assert_eq!(merge_candidates[0].num_files_before, 3); // only shard 0 to be merged, containing 3 overlays
     assert_eq!(
         merge_candidates[0].storage_size_bytes_before,
@@ -1113,7 +1131,7 @@ fn test_make_merge_candidates_to_overlay() {
     );
     assert_eq!(
         merge_candidates[0].input_size_bytes,
-        storage_files.overlays[3..5]
+        merge_overlay_paths(&merge_candidates[0])
             .iter()
             .map(|p| p.metadata().unwrap().len())
             .sum::<u64>()
@@ -1143,6 +1161,7 @@ fn test_make_merge_candidate_to_base() {
             overlay_suffix: "vmemory_0.overlay".to_owned(),
         },
         3,
+        Vec::new(),
     )
     .unwrap()
     .unwrap();
@@ -1151,7 +1170,175 @@ fn test_make_merge_candidate_to_base() {
         MergeDestination::BaseFile(tempdir.path().join("vmemory_0.bin"))
     );
     assert!(merge_candidate.base.is_none());
-    assert_eq!(merge_candidate.overlays, storage_files.overlays);
+    assert_eq!(
+        merge_overlay_paths(&merge_candidate),
+        storage_files.overlays
+    );
+}
+
+fn page_delta_with_value(indices: &[u64], value: u8) -> PageDelta {
+    let allocator = PageAllocator::new_for_testing();
+    let page = [value; PAGE_SIZE];
+    let pages: Vec<_> = indices
+        .iter()
+        .map(|index| (PageIndex::new(*index), &page))
+        .collect();
+    PageDelta::from(allocator.allocate(&pages))
+}
+
+fn write_overlay_with_value(
+    storage_layout: &ShardedTestStorageLayout,
+    height: Height,
+    indices: &[u64],
+    value: u8,
+    metrics: &StorageMetrics,
+) {
+    let delta = page_delta_with_value(indices, value);
+    OverlayFile::write(
+        &delta,
+        storage_layout,
+        height,
+        &lsmt_config_unsharded(),
+        metrics,
+    )
+    .unwrap();
+}
+
+fn storage_page_limit_survives_merge(is_partial_merge: bool) {
+    let tempdir = tempdir().unwrap();
+    let storage_layout = ShardedTestStorageLayout {
+        dir_path: tempdir.path().to_path_buf(),
+        base: tempdir.path().join("vmemory_0.bin"),
+        overlay_suffix: "vmemory_0.overlay".to_owned(),
+    };
+    let metrics = StorageMetrics::new(&MetricsRegistry::new());
+    let storage_page_limit = StoragePageLimit {
+        max_pages: 2,
+        valid_storage_from_height: Some(Height::new(1)),
+    };
+
+    let old_pages: Vec<_> = if is_partial_merge {
+        (0..20).collect()
+    } else {
+        (0..4).collect()
+    };
+    write_overlay_with_value(&storage_layout, Height::new(0), &old_pages, 1, &metrics);
+    write_overlay_with_value(&storage_layout, Height::new(1), &[3], 2, &metrics);
+    if is_partial_merge {
+        write_overlay_with_value(&storage_layout, Height::new(2), &[3, 4], 3, &metrics);
+    }
+
+    let merge_height = if is_partial_merge { 3 } else { 2 };
+    let num_pages = if is_partial_merge { 20 } else { 4 };
+    let merges = MergeCandidate::new(
+        &storage_layout,
+        Height::new(merge_height),
+        num_pages,
+        vec![storage_page_limit],
+        &lsmt_config_unsharded(),
+        &metrics,
+    )
+    .unwrap();
+    assert_eq!(merges.len(), 1);
+    assert_eq!(merges[0].is_full_merge(), !is_partial_merge);
+    merges[0].apply(&metrics).unwrap();
+
+    let storage = Storage::lazy_load(Box::new(storage_layout)).unwrap();
+    assert_eq!(
+        storage.get_page_from_height(PageIndex::new(2), Height::new(1)),
+        &[0_u8; PAGE_SIZE]
+    );
+    assert_eq!(
+        storage.get_page_from_height(PageIndex::new(3), Height::new(1)),
+        &[if is_partial_merge { 3_u8 } else { 2_u8 }; PAGE_SIZE]
+    );
+}
+
+#[test]
+fn storage_page_limit_generations_survive_merge() {
+    let tempdir = tempdir().unwrap();
+    let storage_layout = ShardedTestStorageLayout {
+        dir_path: tempdir.path().to_path_buf(),
+        base: tempdir.path().join("vmemory_0.bin"),
+        overlay_suffix: "vmemory_0.overlay".to_owned(),
+    };
+    let metrics = StorageMetrics::new(&MetricsRegistry::new());
+    let storage_page_limits = vec![
+        StoragePageLimit {
+            max_pages: 8,
+            valid_storage_from_height: Some(Height::new(1)),
+        },
+        StoragePageLimit {
+            max_pages: 9,
+            valid_storage_from_height: Some(Height::new(3)),
+        },
+    ];
+
+    write_overlay_with_value(
+        &storage_layout,
+        Height::new(0),
+        &(0..10).collect::<Vec<_>>(),
+        1,
+        &metrics,
+    );
+    write_overlay_with_value(&storage_layout, Height::new(2), &[8, 9], 2, &metrics);
+    write_overlay_with_value(&storage_layout, Height::new(3), &[9], 3, &metrics);
+
+    let merges = MergeCandidate::new(
+        &storage_layout,
+        Height::new(4),
+        10,
+        storage_page_limits.clone(),
+        &lsmt_config_unsharded(),
+        &metrics,
+    )
+    .unwrap();
+    assert_eq!(merges.len(), 1);
+    merges[0].apply(&metrics).unwrap();
+
+    let mut page_map = PageMap::open(
+        Box::new(storage_layout),
+        Arc::new(TestPageAllocatorFileDescriptorImpl::new()),
+    )
+    .unwrap();
+    page_map.set_storage_page_limits(storage_page_limits);
+
+    assert_eq!(page_map.get_page(PageIndex::new(7)), &[1_u8; PAGE_SIZE]);
+    assert_eq!(page_map.get_page(PageIndex::new(8)), &[2_u8; PAGE_SIZE]);
+    assert_eq!(page_map.get_page(PageIndex::new(9)), &[3_u8; PAGE_SIZE]);
+}
+
+#[test]
+fn storage_page_limit_filters_old_tail_during_full_merge() {
+    storage_page_limit_survives_merge(false);
+}
+
+#[test]
+fn storage_page_limit_filters_old_tail_during_partial_merge() {
+    storage_page_limit_survives_merge(true);
+}
+
+#[test]
+fn merge_to_base_rejects_active_storage_page_limit() {
+    let tempdir = tempdir().unwrap();
+    let storage_layout = ShardedTestStorageLayout {
+        dir_path: tempdir.path().to_path_buf(),
+        base: tempdir.path().join("vmemory_0.bin"),
+        overlay_suffix: "vmemory_0.overlay".to_owned(),
+    };
+    let metrics = StorageMetrics::new(&MetricsRegistry::new());
+    write_overlay_with_value(&storage_layout, Height::new(0), &[0], 1, &metrics);
+
+    let result = MergeCandidate::merge_to_base(
+        &storage_layout,
+        1,
+        vec![StoragePageLimit {
+            max_pages: 0,
+            valid_storage_from_height: Some(Height::new(1)),
+        }],
+    );
+
+    assert!(result.is_err());
 }
 
 #[test]
@@ -1178,6 +1365,7 @@ fn test_two_same_length_files_are_a_pyramid() {
         },
         Height::from(0),
         2, /* num_pages */
+        Vec::new(),
         &lsmt_config_unsharded(),
         &StorageMetrics::new(&MetricsRegistry::new()),
     )
@@ -1441,7 +1629,7 @@ fn sharded_base_file() {
     // get_base_memory_instructions is exhaustive => empty get_memory_instructions.
     assert!(
         storage
-            .get_memory_instructions(full_range.clone(), &mut filter.clone())
+            .get_memory_instructions(full_range.clone(), &mut filter.clone(), None)
             .instructions
             .is_empty()
     );
@@ -1472,7 +1660,7 @@ fn sharded_base_file() {
     .unwrap();
     assert!(
         !storage
-            .get_memory_instructions(full_range, &mut filter.clone())
+            .get_memory_instructions(full_range, &mut filter.clone(), None)
             .instructions
             .is_empty()
     )

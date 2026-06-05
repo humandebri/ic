@@ -269,6 +269,8 @@ pub enum SystemApiCallId {
     SubnetSelfCopy,
     /// Tracker for `ic0.stable64_grow()`
     Stable64Grow,
+    /// Tracker for `ic0.stable64_shrink()`
+    Stable64Shrink,
     /// Tracker for `ic0.stable64_read()`
     Stable64Read,
     /// Tracker for `ic0.stable64_size()`
@@ -1126,6 +1128,13 @@ pub trait SystemApi {
         stable_memory_api: StableMemoryApi,
     ) -> HypervisorResult<StableGrowOutcome>;
 
+    /// Attempts to shrink stable memory and update memory accounting.
+    fn try_shrink_stable_memory(
+        &mut self,
+        current_size: u64,
+        removed_pages: u64,
+    ) -> HypervisorResult<StableGrowOutcome>;
+
     /// (deprecated) Please use `ic0_canister_cycle_balance128` instead.
     /// This API supports only 64-bit values.
     ///
@@ -1651,6 +1660,7 @@ pub struct WasmExecutionOutput {
     pub wasm_result: Result<Option<WasmResult>, HypervisorError>,
     pub num_instructions_left: NumInstructions,
     pub allocated_bytes: NumBytes,
+    pub deallocated_bytes: NumBytes,
     pub allocated_guaranteed_response_message_bytes: NumBytes,
     pub new_memory_usage: Option<NumBytes>,
     pub new_message_memory_usage: Option<MessageMemoryUsage>,

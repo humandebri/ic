@@ -752,6 +752,7 @@ impl InstallCodeHelper {
             execution_state.stable_memory = stable_memory;
             execution_state.exported_globals = globals;
             self.allocated_bytes += output.allocated_bytes;
+            self.deallocated_bytes += output.deallocated_bytes;
             debug_assert_eq!(
                 output.allocated_guaranteed_response_message_bytes,
                 NumBytes::new(0)

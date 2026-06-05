@@ -61,6 +61,7 @@ pub(super) fn replacement_functions(
     let count_clean_pages_fn_index = injected_counters.count_clean_pages_fn;
     let dirty_pages_counter_index = injected_counters.dirty_pages_counter;
     let accessed_pages_counter_index = injected_counters.accessed_pages_counter;
+    let stable_memory_size_index = injected_counters.stable_memory_size;
     let decr_instruction_counter_fn = injected_counters.decr_instruction_counter_fn;
 
     use wirm::wasmparser::Operator::*;
@@ -91,8 +92,8 @@ pub(super) fn replacement_functions(
                 make_body(
                     vec![],
                     vec![
-                        MemorySize {
-                            mem: stable_memory_index,
+                        GlobalGet {
+                            global_index: stable_memory_size_index,
                         },
                         I64Const {
                             value: MAX_32_BIT_STABLE_MEMORY_IN_PAGES,
@@ -108,8 +109,8 @@ pub(super) fn replacement_functions(
                             function_index: injected_functions.internal_trap,
                         },
                         End,
-                        MemorySize {
-                            mem: stable_memory_index,
+                        GlobalGet {
+                            global_index: stable_memory_size_index,
                         },
                         I32WrapI64,
                     ],
@@ -123,8 +124,8 @@ pub(super) fn replacement_functions(
                 vec![DataType::I64],
                 make_body(
                     vec![],
-                    vec![MemorySize {
-                        mem: stable_memory_index,
+                    vec![GlobalGet {
+                        global_index: stable_memory_size_index,
                     }],
                 ),
             ),
@@ -135,12 +136,13 @@ pub(super) fn replacement_functions(
                 vec![DataType::I32],
                 vec![DataType::I32],
                 make_body(
-                    vec![(1, DataType::I64)],
+                    vec![(4, DataType::I64)],
                     vec![
                         // Call try_grow_stable_memory API.
-                        MemorySize {
-                            mem: stable_memory_index,
+                        GlobalGet {
+                            global_index: stable_memory_size_index,
                         },
+                        LocalTee { local_index: 1 },
                         LocalGet { local_index: 0 },
                         I64ExtendI32U,
                         I32Const {
@@ -158,16 +160,30 @@ pub(super) fn replacement_functions(
                         I32Const { value: -1 },
                         Return,
                         End,
-                        // If successful, do the actual grow.
+                        // Compute the new logical stable memory size.
+                        LocalGet { local_index: 1 },
                         LocalGet { local_index: 0 },
                         I64ExtendI32U,
+                        I64Add,
+                        LocalTee { local_index: 2 },
+                        // Grow the physical Wasm memory only if the logical
+                        // size exceeds the currently allocated size.
+                        MemorySize {
+                            mem: stable_memory_index,
+                        },
+                        I64GtU,
+                        If {
+                            blockty: BlockType::Empty,
+                        },
+                        LocalGet { local_index: 2 },
+                        MemorySize {
+                            mem: stable_memory_index,
+                        },
+                        I64Sub,
                         MemoryGrow {
                             mem: stable_memory_index,
                         },
-                        LocalTee { local_index: 1 },
-                        // If result is -1 then grow instruction failed - this
-                        // shouldn't happen because the try grow API should have
-                        // checked everything.
+                        LocalTee { local_index: 3 },
                         I64Const { value: -1 },
                         I64Eq,
                         If {
@@ -180,7 +196,29 @@ pub(super) fn replacement_functions(
                             function_index: injected_functions.internal_trap,
                         },
                         End,
-                        // Grow succeeded, return result of memory.grow.
+                        End,
+                        // Re-grown pages must not expose data from a previous
+                        // logical size.
+                        LocalGet { local_index: 1 },
+                        I64Const {
+                            value: WASM_PAGE_SIZE as i64,
+                        },
+                        I64Mul,
+                        I32Const { value: 0 },
+                        LocalGet { local_index: 0 },
+                        I64ExtendI32U,
+                        I64Const {
+                            value: WASM_PAGE_SIZE as i64,
+                        },
+                        I64Mul,
+                        MemoryFill {
+                            mem: stable_memory_index,
+                        },
+                        LocalGet { local_index: 2 },
+                        GlobalSet {
+                            global_index: stable_memory_size_index,
+                        },
+                        // Return the previous logical stable memory size.
                         LocalGet { local_index: 1 },
                         // We've already checked the resulting size is valid for 32-bit API when calling
                         // the try_grow_stable_memory API.
@@ -195,12 +233,13 @@ pub(super) fn replacement_functions(
                 vec![DataType::I64],
                 vec![DataType::I64],
                 make_body(
-                    vec![(1, DataType::I64)],
+                    vec![(4, DataType::I64)],
                     vec![
                         // Call try_grow_stable_memory API.
-                        MemorySize {
-                            mem: stable_memory_index,
+                        GlobalGet {
+                            global_index: stable_memory_size_index,
                         },
+                        LocalTee { local_index: 1 },
                         LocalGet { local_index: 0 },
                         I32Const {
                             value: StableMemoryApi::Stable64 as i32,
@@ -217,15 +256,29 @@ pub(super) fn replacement_functions(
                         I64Const { value: -1 },
                         Return,
                         End, // End try_grow_stable_memory check.
-                        // Actually do the grow, store result in local 1.
+                        // Compute the new logical stable memory size.
+                        LocalGet { local_index: 1 },
                         LocalGet { local_index: 0 },
+                        I64Add,
+                        LocalTee { local_index: 2 },
+                        // Grow the physical Wasm memory only if the logical
+                        // size exceeds the currently allocated size.
+                        MemorySize {
+                            mem: stable_memory_index,
+                        },
+                        I64GtU,
+                        If {
+                            blockty: BlockType::Empty,
+                        },
+                        LocalGet { local_index: 2 },
+                        MemorySize {
+                            mem: stable_memory_index,
+                        },
+                        I64Sub,
                         MemoryGrow {
                             mem: stable_memory_index,
                         },
-                        LocalTee { local_index: 1 },
-                        // If result is -1 then grow instruction failed - this
-                        // shouldn't happen because the try grow API should have
-                        // checked everything.
+                        LocalTee { local_index: 3 },
                         I64Const { value: -1 },
                         I64Eq,
                         If {
@@ -238,7 +291,64 @@ pub(super) fn replacement_functions(
                             function_index: injected_functions.internal_trap,
                         },
                         End,
-                        // Return the result of memory.grow.
+                        End,
+                        // Re-grown pages must not expose data from a previous
+                        // logical size.
+                        LocalGet { local_index: 1 },
+                        I64Const {
+                            value: WASM_PAGE_SIZE as i64,
+                        },
+                        I64Mul,
+                        I32Const { value: 0 },
+                        LocalGet { local_index: 0 },
+                        I64Const {
+                            value: WASM_PAGE_SIZE as i64,
+                        },
+                        I64Mul,
+                        MemoryFill {
+                            mem: stable_memory_index,
+                        },
+                        LocalGet { local_index: 2 },
+                        GlobalSet {
+                            global_index: stable_memory_size_index,
+                        },
+                        // Return the previous logical stable memory size.
+                        LocalGet { local_index: 1 },
+                    ],
+                ),
+            ),
+        ),
+        (
+            SystemApiFunc::Stable64Shrink,
+            (
+                vec![DataType::I64],
+                vec![DataType::I64],
+                make_body(
+                    vec![(2, DataType::I64)],
+                    vec![
+                        GlobalGet {
+                            global_index: stable_memory_size_index,
+                        },
+                        LocalTee { local_index: 1 },
+                        LocalGet { local_index: 0 },
+                        Call {
+                            function_index: injected_functions.try_shrink_stable_memory,
+                        },
+                        I64Const { value: -1 },
+                        I64Eq,
+                        If {
+                            blockty: BlockType::Empty,
+                        },
+                        I64Const { value: -1 },
+                        Return,
+                        End,
+                        LocalGet { local_index: 1 },
+                        LocalGet { local_index: 0 },
+                        I64Sub,
+                        LocalTee { local_index: 2 },
+                        GlobalSet {
+                            global_index: stable_memory_size_index,
+                        },
                         LocalGet { local_index: 1 },
                     ],
                 ),
@@ -283,8 +393,8 @@ pub(super) fn replacement_functions(
                         Return,
                         End,
                         // If memory is too big for 32bit api, we trap
-                        MemorySize {
-                            mem: stable_memory_index,
+                        GlobalGet {
+                            global_index: stable_memory_size_index,
                         },
                         I64Const {
                             value: MAX_32_BIT_STABLE_MEMORY_IN_PAGES,
@@ -306,8 +416,8 @@ pub(super) fn replacement_functions(
                         LocalGet { local_index: LEN },
                         I64ExtendI32U,
                         I64Add,
-                        MemorySize {
-                            mem: stable_memory_index,
+                        GlobalGet {
+                            global_index: stable_memory_size_index,
                         },
                         I64Const {
                             value: WASM_PAGE_SIZE as i64,
@@ -548,8 +658,8 @@ pub(super) fn replacement_functions(
                         LocalGet { local_index: SRC },
                         LocalGet { local_index: LEN },
                         I64Add,
-                        MemorySize {
-                            mem: stable_memory_index,
+                        GlobalGet {
+                            global_index: stable_memory_size_index,
                         },
                         I64Const {
                             value: WASM_PAGE_SIZE as i64,
@@ -792,8 +902,8 @@ pub(super) fn replacement_functions(
                         },
                         Drop,
                         // If memory is too big for 32bit api, we trap
-                        MemorySize {
-                            mem: stable_memory_index,
+                        GlobalGet {
+                            global_index: stable_memory_size_index,
                         },
                         I64Const {
                             value: MAX_32_BIT_STABLE_MEMORY_IN_PAGES,
@@ -815,8 +925,8 @@ pub(super) fn replacement_functions(
                         LocalGet { local_index: LEN },
                         I64ExtendI32U,
                         I64Add,
-                        MemorySize {
-                            mem: stable_memory_index,
+                        GlobalGet {
+                            global_index: stable_memory_size_index,
                         },
                         I64Const {
                             value: WASM_PAGE_SIZE as i64,
@@ -1038,8 +1148,8 @@ pub(super) fn replacement_functions(
                         LocalGet { local_index: DST },
                         LocalGet { local_index: LEN },
                         I64Add,
-                        MemorySize {
-                            mem: stable_memory_index,
+                        GlobalGet {
+                            global_index: stable_memory_size_index,
                         },
                         I64Const {
                             value: WASM_PAGE_SIZE as i64,

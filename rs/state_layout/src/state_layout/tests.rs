@@ -8,13 +8,16 @@ use ic_replicated_state::canister_state::system_state::PausedExecutionId;
 use ic_replicated_state::canister_state::system_state::testing::CallContextManagerTesting;
 use ic_replicated_state::{CallContextManager, ExecutionTask};
 use ic_replicated_state::{
-    NumWasmPages, canister_state::system_state::CanisterHistory,
-    metadata_state::subnet_call_context_manager::InstallCodeCallId, page_map::Shard,
+    NumWasmPages,
+    canister_state::system_state::CanisterHistory,
+    metadata_state::subnet_call_context_manager::InstallCodeCallId,
+    page_map::{Shard, StoragePageLimit},
 };
 use ic_test_utilities_logger::with_test_replica_logger;
 use ic_test_utilities_tmpdir::tmpdir;
 use ic_test_utilities_types::messages::{IngressBuilder, RequestBuilder, ResponseBuilder};
 use ic_test_utilities_types::{ids::canister_test_id, ids::user_test_id};
+use ic_types::Height;
 use ic_types::messages::{
     CallContextId, CanisterCall, CanisterMessage, CanisterMessageOrTask, CanisterTask, NO_DEADLINE,
 };
@@ -46,6 +49,7 @@ fn default_canister_state_bits() -> CanisterStateBits {
         certified_data: vec![],
         consumed_cycles: NominalCycles::zero(),
         stable_memory_size: NumWasmPages::from(0),
+        stable_memory_storage_page_limits: Vec::new(),
         heap_delta_debit: NumBytes::from(0),
         install_code_debit: NumInstructions::from(0),
         time_of_last_allocation_charge_nanos: 0,
@@ -243,8 +247,48 @@ fn test_encode_decode_non_empty_history() {
 }
 
 #[test]
+fn test_canister_state_stable_memory_limits_and_log_memory_idx_roundtrip() {
+    let storage_page_limits = vec![
+        StoragePageLimit {
+            max_pages: 8,
+            valid_storage_from_height: Some(Height::new(1)),
+        },
+        StoragePageLimit {
+            max_pages: 9,
+            valid_storage_from_height: Some(Height::new(3)),
+        },
+    ];
+    let canister_state_bits = CanisterStateBits {
+        stable_memory_storage_page_limits: storage_page_limits.clone(),
+        log_memory_store_persistent_next_idx: 67,
+        ..default_canister_state_bits()
+    };
+
+    let pb_bits = pb_canister_state_bits::CanisterStateBits::from(canister_state_bits);
+    assert_eq!(pb_bits.log_memory_store_persistent_next_idx, 67);
+    assert_eq!(pb_bits.stable_memory_storage_page_limits.len(), 2);
+
+    let canister_state_bits = CanisterStateBits::try_from(pb_bits).unwrap();
+    assert_eq!(
+        canister_state_bits.stable_memory_storage_page_limits,
+        storage_page_limits
+    );
+    assert_eq!(canister_state_bits.log_memory_store_persistent_next_idx, 67);
+}
+
+#[test]
 fn test_canister_snapshots_decode() {
     let canister_id = canister_test_id(7);
+    let stable_memory_storage_page_limits = vec![
+        StoragePageLimit {
+            max_pages: 8,
+            valid_storage_from_height: Some(Height::new(1)),
+        },
+        StoragePageLimit {
+            max_pages: 9,
+            valid_storage_from_height: Some(Height::new(3)),
+        },
+    ];
     let canister_snapshot_bits = CanisterSnapshotBits {
         snapshot_id: SnapshotId::from((canister_id, 5)),
         taken_at_timestamp: UNIX_EPOCH,
@@ -253,6 +297,7 @@ fn test_canister_snapshots_decode() {
         certified_data: vec![3, 4, 7],
         wasm_chunk_store_metadata: WasmChunkStoreMetadata::default(),
         stable_memory_size: NumWasmPages::new(10),
+        stable_memory_storage_page_limits,
         wasm_memory_size: NumWasmPages::new(10),
         total_size: NumBytes::new(100),
         exported_globals: vec![Global::I32(1), Global::I64(2), Global::F64(0.1)],

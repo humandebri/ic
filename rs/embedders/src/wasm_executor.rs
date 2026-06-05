@@ -11,7 +11,9 @@ use ic_interfaces::execution_environment::{
 use ic_logger::{ReplicaLogger, warn};
 use ic_management_canister_types_private::Global;
 use ic_metrics::MetricsRegistry;
-use ic_replicated_state::canister_state::execution_state::NextScheduledMethod;
+use ic_replicated_state::canister_state::{
+    WASM_PAGE_SIZE_IN_BYTES, execution_state::NextScheduledMethod,
+};
 use ic_replicated_state::{EmbedderCache, ExecutionState};
 use ic_replicated_state::{
     ExportedFunctions, Memory, NumWasmPages, PageMap, canister_state::execution_state::WasmBinary,
@@ -472,6 +474,7 @@ pub fn wasm_execution_error(
             wasm_result: Err(err),
             num_instructions_left,
             allocated_bytes: NumBytes::new(0),
+            deallocated_bytes: NumBytes::new(0),
             allocated_guaranteed_response_message_bytes: NumBytes::new(0),
             new_memory_usage: None,
             new_message_memory_usage: None,
@@ -641,6 +644,7 @@ pub fn process(
                     wasm_result: Err(err),
                     num_instructions_left: message_instruction_limit,
                     allocated_bytes: NumBytes::new(0),
+                    deallocated_bytes: NumBytes::new(0),
                     allocated_guaranteed_response_message_bytes: NumBytes::new(0),
                     new_memory_usage: None,
                     new_message_memory_usage: None,
@@ -695,6 +699,7 @@ pub fn process(
                         wasm_result: Err(err),
                         num_instructions_left: message_instructions_left,
                         allocated_bytes: NumBytes::new(0),
+                        deallocated_bytes: NumBytes::new(0),
                         allocated_guaranteed_response_message_bytes: NumBytes::new(0),
                         new_memory_usage: None,
                         new_message_memory_usage: None,
@@ -736,6 +741,7 @@ pub fn process(
     }
 
     let mut allocated_bytes = NumBytes::new(0);
+    let mut deallocated_bytes = NumBytes::new(0);
     let mut allocated_guaranteed_response_message_bytes = NumBytes::new(0);
     let mut new_memory_usage = None;
     let mut new_message_memory_usage = None;
@@ -753,15 +759,36 @@ pub fn process(
                     ));
 
                     // Update the stable memory and serialize the delta.
+                    let old_stable_memory_size = stable_memory.size;
                     stable_memory.size = instance.heap_size(CanisterMemoryType::Stable);
                     let stable_memory_delta = stable_memory.page_map.update(&compute_page_delta(
                         &mut instance,
                         &run_result.stable_memory_dirty_pages,
                         CanisterMemoryType::Stable,
                     ));
+                    let stable_memory_host_pages =
+                        stable_memory.size.get() * WASM_PAGE_SIZE_IN_BYTES / PAGE_SIZE;
                     // unwrap should not fail, because we passed Some(system_api) when creating the instance
                     let sys_api = instance.store_data().system_api().unwrap();
+                    if let Some(min_stable_memory_size) =
+                        sys_api.get_min_stable_memory_size_during_execution()
+                        && min_stable_memory_size < old_stable_memory_size
+                    {
+                        let stable_memory_storage_limit_pages =
+                            min_stable_memory_size.get() * WASM_PAGE_SIZE_IN_BYTES / PAGE_SIZE;
+                        stable_memory
+                            .page_map
+                            .limit_storage_to_pages_and_truncate_delta(
+                                stable_memory_storage_limit_pages,
+                                stable_memory_host_pages,
+                            );
+                    } else {
+                        stable_memory
+                            .page_map
+                            .truncate_delta_to_pages(stable_memory_host_pages);
+                    }
                     allocated_bytes = sys_api.get_allocated_bytes();
+                    deallocated_bytes = sys_api.get_deallocated_bytes();
                     allocated_guaranteed_response_message_bytes =
                         sys_api.get_allocated_guaranteed_response_message_bytes();
                     new_memory_usage = Some(sys_api.get_current_memory_usage());
@@ -797,6 +824,7 @@ pub fn process(
             wasm_result,
             num_instructions_left: message_instructions_left,
             allocated_bytes,
+            deallocated_bytes,
             allocated_guaranteed_response_message_bytes,
             new_memory_usage,
             new_message_memory_usage,

@@ -286,6 +286,10 @@ fn eval(ops_bytes: OpsBytes) {
                 let i = stack.pop_int64();
                 stack.push_int64(api::stable64_grow(i))
             }
+            Ops::StableShrink64 => {
+                let i = stack.pop_int64();
+                stack.push_int64(api::stable64_shrink(i))
+            }
             Ops::StableRead64 => {
                 let size = stack.pop_int64();
                 let offset = stack.pop_int64();

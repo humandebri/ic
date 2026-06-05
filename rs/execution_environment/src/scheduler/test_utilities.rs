@@ -1383,6 +1383,7 @@ impl TestWasmExecutorCore {
                 wasm_result: Err(HypervisorError::InstructionLimitExceeded(message_limit)),
                 num_instructions_left: NumInstructions::from(0),
                 allocated_bytes: NumBytes::from(0),
+                deallocated_bytes: NumBytes::from(0),
                 allocated_guaranteed_response_message_bytes: NumBytes::from(0),
                 new_memory_usage: None,
                 new_message_memory_usage: None,
@@ -1433,6 +1434,7 @@ impl TestWasmExecutorCore {
         let output = WasmExecutionOutput {
             wasm_result: Ok(None),
             allocated_bytes: num_bytes_try_from(message.allocate_pages).unwrap(),
+            deallocated_bytes: NumBytes::from(0),
             allocated_guaranteed_response_message_bytes: NumBytes::from(0),
             new_memory_usage: None,
             new_message_memory_usage: None,

@@ -35,6 +35,7 @@ use ic_types_cycles::{
 };
 use ic_utils::deterministic_operations::deterministic_copy_from_slice;
 use ic_wasm_types::doc_ref;
+use num_traits::SaturatingSub;
 use request_in_prep::{RequestInPrep, into_request};
 use sandbox_safe_system_state::{
     ConsumedCyclesDuringExecution, SandboxSafeSystemState, SystemStateModifications,
@@ -945,6 +946,9 @@ struct MemoryUsage {
     /// the memory allocation of the canister.
     allocated_execution_memory: NumBytes,
 
+    /// Execution memory deallocated during this message execution.
+    deallocated_execution_memory: NumBytes,
+
     /// Message memory allocated during this message execution.
     allocated_message_memory: MessageMemoryUsage,
 
@@ -970,6 +974,7 @@ impl MemoryUsage {
             current_message_usage,
             subnet_available_memory,
             allocated_execution_memory: NumBytes::new(0),
+            deallocated_execution_memory: NumBytes::new(0),
             allocated_message_memory: MessageMemoryUsage::ZERO,
             memory_allocation,
         }
@@ -1098,6 +1103,50 @@ impl MemoryUsage {
                 add_memory(&mut self.stable_memory_usage, execution_bytes)
             }
         }
+    }
+
+    fn deallocate_execution_memory(
+        &mut self,
+        usage_decrease_bytes: NumBytes,
+        api_type: &ApiType,
+        execution_memory_type: ExecutionMemoryType,
+    ) -> HypervisorResult<()> {
+        let new_usage = self
+            .current_usage
+            .get()
+            .checked_sub(usage_decrease_bytes.get())
+            .ok_or_else(|| HypervisorError::ToolchainContractViolation {
+                error: "stable memory shrink exceeds current memory usage".to_string(),
+            })?;
+        let old_allocated_bytes = self.memory_allocation.allocated_bytes(self.current_usage);
+        let new_allocated_bytes = self
+            .memory_allocation
+            .allocated_bytes(NumBytes::new(new_usage));
+        debug_assert!(new_allocated_bytes <= old_allocated_bytes);
+        let deallocated_bytes = old_allocated_bytes - new_allocated_bytes;
+
+        if api_type.should_update_available_memory_and_reserved_cycles() {
+            self.subnet_available_memory.increment(
+                deallocated_bytes,
+                NumBytes::new(0),
+                NumBytes::new(0),
+            );
+        }
+        self.deallocated_execution_memory += deallocated_bytes;
+
+        self.current_usage = NumBytes::new(new_usage);
+        match execution_memory_type {
+            ExecutionMemoryType::WasmMemory => {
+                self.wasm_memory_usage =
+                    self.wasm_memory_usage.saturating_sub(&usage_decrease_bytes)
+            }
+            ExecutionMemoryType::StableMemory => {
+                self.stable_memory_usage = self
+                    .stable_memory_usage
+                    .saturating_sub(&usage_decrease_bytes)
+            }
+        }
+        Ok(())
     }
 
     /// Tries to allocate the requested amount of message memory.
@@ -1230,6 +1279,10 @@ pub struct SystemApiImpl {
 
     /// How many times each tracked System API call was invoked.
     call_counters: SystemApiCallCounters,
+
+    /// Smallest logical stable memory size reached by a successful shrink in
+    /// this execution.
+    min_stable_memory_size_during_execution: Option<NumWasmPages>,
 }
 
 impl SystemApiImpl {
@@ -1285,6 +1338,7 @@ impl SystemApiImpl {
             current_slice_instruction_limit: i64::try_from(slice_limit).unwrap_or(i64::MAX),
             instructions_executed_before_current_slice: 0,
             call_counters: SystemApiCallCounters::default(),
+            min_stable_memory_size_during_execution: None,
         }
     }
 
@@ -1407,11 +1461,19 @@ impl SystemApiImpl {
         self.memory_usage.allocated_execution_memory
     }
 
+    pub fn get_deallocated_bytes(&self) -> NumBytes {
+        self.memory_usage.deallocated_execution_memory
+    }
+
     /// Bytes used by or reserved for for guaranteed response messages.
     pub fn get_allocated_guaranteed_response_message_bytes(&self) -> NumBytes {
         self.memory_usage
             .allocated_message_memory
             .guaranteed_response
+    }
+
+    pub fn get_min_stable_memory_size_during_execution(&self) -> Option<NumWasmPages> {
+        self.min_stable_memory_size_during_execution
     }
 
     fn error_for(&self, method_name: &str) -> HypervisorError {
@@ -3567,6 +3629,43 @@ impl SystemApi for SystemApiImpl {
             }
             Err(_) => Ok(StableGrowOutcome::Failure),
         }
+    }
+
+    fn try_shrink_stable_memory(
+        &mut self,
+        current_size: u64,
+        removed_pages: u64,
+    ) -> HypervisorResult<StableGrowOutcome> {
+        // This is only the runtime primitive for releasing a stable memory tail.
+        // Higher-level allocators must first move live data away from the tail,
+        // update their metadata, and then call `stable64_shrink` for the fully
+        // unused suffix. For example, a future MemoryManager bucket reclaimer
+        // should free buckets by MemoryId, compact live buckets to lower
+        // offsets incrementally, and shrink only complete free tail pages.
+        if removed_pages > current_size {
+            return Ok(StableGrowOutcome::Failure);
+        }
+        let Ok(execution_bytes) =
+            ic_replicated_state::num_bytes_try_from(NumWasmPages::new(removed_pages as usize))
+        else {
+            return Ok(StableGrowOutcome::Failure);
+        };
+        self.memory_usage.deallocate_execution_memory(
+            execution_bytes,
+            &self.api_type,
+            ExecutionMemoryType::StableMemory,
+        )?;
+        if removed_pages > 0 {
+            let new_size = current_size - removed_pages;
+            let new_size = NumWasmPages::new(
+                usize::try_from(new_size).expect("stable memory size does not fit in usize"),
+            );
+            self.min_stable_memory_size_during_execution = Some(
+                self.min_stable_memory_size_during_execution
+                    .map_or(new_size, |current_min| current_min.min(new_size)),
+            );
+        }
+        Ok(StableGrowOutcome::Success)
     }
 
     fn ic0_canister_cycle_balance(&mut self) -> HypervisorResult<u64> {

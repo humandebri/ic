@@ -921,7 +921,7 @@ fn run_charge_for_dirty_stable64_test() {
         .dirty_page_overhead
         .get();
 
-    let csg = system_api_complexity::overhead_native::STABLE_GROW.get();
+    let csg = system_api_complexity::overhead_native::STABLE_GROW_OR_SHRINK.get();
     let csw = system_api_complexity::overhead_native::STABLE64_WRITE.get()
         + system_api
             .get_num_instructions_from_bytes(NumBytes::from(1))
@@ -1038,7 +1038,7 @@ fn run_charge_for_dirty_stable_test() {
         .dirty_page_overhead
         .get();
 
-    let csg = system_api_complexity::overhead_native::STABLE_GROW.get();
+    let csg = system_api_complexity::overhead_native::STABLE_GROW_OR_SHRINK.get();
     let csw = system_api_complexity::overhead_native::STABLE_WRITE.get()
         + system_api
             .get_num_instructions_from_bytes(NumBytes::from(1))

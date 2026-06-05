@@ -180,6 +180,16 @@ impl PageDelta {
     fn len(&self) -> usize {
         self.0.len()
     }
+
+    /// Removes all pages at indexes greater than or equal to `max_pages`.
+    fn truncate(&mut self, max_pages: usize) {
+        self.0 = self
+            .0
+            .iter()
+            .filter(|(index, _)| index.get() < max_pages as u64)
+            .map(|(index, page)| (*index, page.clone()))
+            .collect();
+    }
 }
 
 impl<I> From<I> for PageDelta
@@ -434,6 +444,21 @@ pub struct PageMap {
     /// flush.
     #[validate_eq(Ignore)]
     has_files_in_tip: bool,
+
+    /// Upper bounds for old checkpoint storage pages.
+    ///
+    /// Stable memory can shrink logically while checkpoint files still contain
+    /// older tail pages. Each entry represents one shrink generation. For a
+    /// page, the last generation whose `max_pages` is less than or equal to the
+    /// page index determines which storage pages remain visible.
+    #[validate_eq(Ignore)]
+    storage_page_limits: Vec<StoragePageLimit>,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Deserialize, Serialize)]
+pub struct StoragePageLimit {
+    pub max_pages: usize,
+    pub valid_storage_from_height: Option<Height>,
 }
 
 impl PageMap {
@@ -451,6 +476,7 @@ impl PageMap {
             unflushed_delta: Default::default(),
             page_allocator: PageAllocator::new(fd_factory),
             has_files_in_tip: false,
+            storage_page_limits: Vec::new(),
         }
     }
 
@@ -462,6 +488,7 @@ impl PageMap {
             unflushed_delta: Default::default(),
             page_allocator: PageAllocator::new_for_testing(),
             has_files_in_tip: false,
+            storage_page_limits: Vec::new(),
         }
     }
 
@@ -478,6 +505,7 @@ impl PageMap {
             unflushed_delta: Default::default(),
             page_allocator: PageAllocator::new(fd_factory),
             has_files_in_tip: true,
+            storage_page_limits: Vec::new(),
         })
     }
 
@@ -493,6 +521,7 @@ impl PageMap {
                 .serialize_page_delta(self.unflushed_delta.iter()),
             page_allocator: self.page_allocator.serialize(),
             has_files_in_tip: self.has_files_in_tip,
+            storage_page_limits: self.storage_page_limits.clone(),
         }
     }
 
@@ -517,6 +546,7 @@ impl PageMap {
             unflushed_delta,
             page_allocator,
             has_files_in_tip: page_map.has_files_in_tip,
+            storage_page_limits: page_map.storage_page_limits,
         })
     }
 
@@ -595,12 +625,29 @@ impl PageMap {
             .map(|(index, page)| (index, page.contents()))
     }
 
+    pub fn storage_limit_for_page(
+        storage_page_limits: &[StoragePageLimit],
+        page_index: PageIndex,
+    ) -> Option<StoragePageLimit> {
+        storage_page_limits
+            .iter()
+            .rev()
+            .copied()
+            .find(|limit| page_index.get() >= limit.max_pages as u64)
+    }
+
     /// Returns the page with the specified `page_index`.
     pub fn get_page(&self, page_index: PageIndex) -> &PageBytes {
-        match self.page_delta.get_page(page_index) {
-            Some(page) => page,
-            None => self.storage.get_page(page_index),
+        if let Some(page) = self.page_delta.get_page(page_index) {
+            return page;
         }
+        if let Some(limit) = Self::storage_limit_for_page(&self.storage_page_limits, page_index) {
+            return match limit.valid_storage_from_height {
+                Some(height) => self.storage.get_page_from_height(page_index, height),
+                None => &checkpoint::ZEROED_PAGE,
+            };
+        }
+        self.storage.get_page(page_index)
     }
 
     /// Returns a sequence of instructions on how to prepare a memory region. It always returns instructions for at least `min_range`,
@@ -719,11 +766,46 @@ impl PageMap {
                 true,
             );
         }
+        for page in result_range.start.get()..result_range.end.get() {
+            if Self::storage_limit_for_page(&self.storage_page_limits, PageIndex::new(page))
+                .is_some()
+            {
+                filter.set((page - result_range.start.get()) as usize, true);
+            }
+        }
 
         let mut storage_instructions = self
             .storage
-            .get_memory_instructions(result_range.clone(), &mut filter)
+            .get_memory_instructions(result_range.clone(), &mut filter, None)
             .instructions;
+
+        let mut page = result_range.start.get();
+        while page < result_range.end.get() {
+            let limit =
+                Self::storage_limit_for_page(&self.storage_page_limits, PageIndex::new(page));
+            let Some(min_storage_height) = limit.and_then(|limit| limit.valid_storage_from_height)
+            else {
+                page += 1;
+                continue;
+            };
+            let start = page;
+            page += 1;
+            while page < result_range.end.get()
+                && Self::storage_limit_for_page(&self.storage_page_limits, PageIndex::new(page))
+                    .and_then(|limit| limit.valid_storage_from_height)
+                    == Some(min_storage_height)
+            {
+                page += 1;
+            }
+            storage_instructions.extend(
+                self.storage
+                    .get_memory_instructions_from_height(
+                        PageIndex::new(start)..PageIndex::new(page),
+                        min_storage_height,
+                    )
+                    .instructions,
+            );
+        }
         storage_instructions.extend(delta_instructions);
 
         // Find left and right cutoff point to have no instructions fully outside of `min_range`.
@@ -762,24 +844,49 @@ impl PageMap {
     /// The intention is that the instructions from this function are applied first and only once. The more expensive
     /// instructions from `get_memory_instructions(range)` are then applied on top.
     pub fn get_base_memory_instructions(&self) -> MemoryInstructions<'_> {
-        self.storage.get_base_memory_instructions()
+        let mut instructions = self.storage.get_base_memory_instructions();
+        let first_limited_page = self
+            .storage_page_limits
+            .iter()
+            .map(|limit| limit.max_pages)
+            .min();
+        if let Some(first_limited_page) = first_limited_page {
+            instructions
+                .restrict_to_range(&(PageIndex::new(0)..PageIndex::new(first_limited_page as u64)));
+        }
+        instructions
     }
 
     /// Resets the unflushed delta, as it is being flushed to disk.
-    pub fn strip_unflushed_delta(&mut self) {
+    pub fn strip_unflushed_delta(&mut self, height: Height) {
         // Pages have been flushed to disk, so the page map is now consistent with tip.
         self.has_files_in_tip = true;
+        for limit in &mut self.storage_page_limits {
+            if limit.valid_storage_from_height.is_none() {
+                limit.valid_storage_from_height = Some(height);
+            }
+        }
+        Self::compact_storage_page_limits(&mut self.storage_page_limits);
 
         std::mem::take(&mut self.unflushed_delta);
     }
 
+    fn has_pending_storage_page_limit(&self) -> bool {
+        self.storage_page_limits
+            .iter()
+            .any(|limit| limit.valid_storage_from_height.is_none())
+    }
+
     /// Returns `true` if flushing the page map would result in truncating the
-    /// underlying files and/or persisting (non-empty) unflushed delta.
+    /// underlying files, persisting a non-empty unflushed delta, and/or
+    /// materializing pending storage page limit metadata.
     ///
     /// If `true`, calling `strip_unflushed_delta()` will actually mutate the
     /// `PageMap`; if `false`, the call would be a no-op.
     pub fn should_flush(&self) -> bool {
-        !self.has_files_in_tip || !self.unflushed_delta.is_empty()
+        !self.has_files_in_tip
+            || !self.unflushed_delta.is_empty()
+            || self.has_pending_storage_page_limit()
     }
 
     pub fn get_page_delta_indices(&self) -> Vec<PageIndex> {
@@ -810,9 +917,77 @@ impl PageMap {
     /// ∀ n . n ≥ self.num_host_pages() ⇒ self.get_page(n) = ZERO_PAGE
     /// ```
     pub fn num_host_pages(&self) -> usize {
-        let pages_in_checkpoint = self.storage.num_logical_pages();
+        let storage_pages = self.storage.num_logical_pages();
+        let mut pages_in_checkpoint = self
+            .storage_page_limits
+            .iter()
+            .map(|limit| limit.max_pages)
+            .min()
+            .map_or(storage_pages, |first_limited_page| {
+                storage_pages.min(first_limited_page)
+            });
+        for limit in &self.storage_page_limits {
+            if let Some(height) = limit.valid_storage_from_height {
+                pages_in_checkpoint =
+                    pages_in_checkpoint.max(self.storage.num_logical_pages_from_height(height));
+            }
+        }
         pages_in_checkpoint
             .max(self.page_delta.max_page_index().map_or(0, |i| i.get() + 1) as usize)
+    }
+
+    /// Makes checkpoint-backed pages above `max_pages` read as zeros and
+    /// removes in-memory deltas above the same boundary.
+    pub fn truncate_delta_to_pages(&mut self, max_pages: usize) {
+        self.page_delta.truncate(max_pages);
+        self.unflushed_delta.truncate(max_pages);
+    }
+
+    pub fn limit_storage_to_pages(&mut self, max_pages: usize) {
+        self.limit_storage_to_pages_and_truncate_delta(max_pages, max_pages);
+    }
+
+    /// Makes checkpoint-backed pages above `storage_max_pages` read as zeros,
+    /// while preserving in-memory deltas below `delta_max_pages`.
+    pub fn limit_storage_to_pages_and_truncate_delta(
+        &mut self,
+        storage_max_pages: usize,
+        delta_max_pages: usize,
+    ) {
+        self.storage_page_limits.push(StoragePageLimit {
+            max_pages: storage_max_pages,
+            valid_storage_from_height: None,
+        });
+        Self::compact_storage_page_limits(&mut self.storage_page_limits);
+        self.truncate_delta_to_pages(delta_max_pages);
+    }
+
+    fn compact_storage_page_limits(storage_page_limits: &mut Vec<StoragePageLimit>) {
+        let mut compacted = Vec::with_capacity(storage_page_limits.len());
+        for limit in storage_page_limits.iter().rev().copied() {
+            if compacted
+                .iter()
+                .any(|later: &StoragePageLimit| later.max_pages <= limit.max_pages)
+            {
+                continue;
+            }
+            compacted.push(limit);
+        }
+        compacted.reverse();
+        compacted.dedup_by(|later, earlier| {
+            earlier.valid_storage_from_height == later.valid_storage_from_height
+                && earlier.max_pages <= later.max_pages
+        });
+        *storage_page_limits = compacted;
+    }
+
+    pub fn storage_page_limits(&self) -> &[StoragePageLimit] {
+        &self.storage_page_limits
+    }
+
+    pub fn set_storage_page_limits(&mut self, storage_page_limits: Vec<StoragePageLimit>) {
+        self.storage_page_limits = storage_page_limits;
+        Self::compact_storage_page_limits(&mut self.storage_page_limits);
     }
 
     /// Resets this page map to a clean one backed by `storage_layout`.
@@ -826,7 +1001,9 @@ impl PageMap {
         // All deltas must have been flushed to disk.
         assert!(self.unflushed_delta.is_empty());
 
+        let storage_page_limits = self.storage_page_limits.clone();
         *self = PageMap::open(storage_layout, Arc::clone(fd_factory))?;
+        self.storage_page_limits = storage_page_limits;
         Ok(())
     }
 
@@ -865,6 +1042,7 @@ impl PageMap {
             unflushed_delta: Default::default(),
             page_allocator: PageAllocator::new(fd_factory),
             has_files_in_tip: self.has_files_in_tip,
+            storage_page_limits: self.storage_page_limits.clone(),
         })
     }
 }
@@ -1028,6 +1206,8 @@ pub struct PageMapSerialization {
     pub unflushed_delta: PageDeltaSerialization,
     pub page_allocator: PageAllocatorSerialization,
     pub has_files_in_tip: bool,
+    #[serde(default)]
+    pub storage_page_limits: Vec<StoragePageLimit>,
 }
 
 /// Interface for generating unique file descriptors

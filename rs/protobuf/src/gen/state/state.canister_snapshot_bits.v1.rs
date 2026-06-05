@@ -44,4 +44,7 @@ pub struct CanisterSnapshotBits {
         tag = "14"
     )]
     pub source: i32,
+    #[prost(message, repeated, tag = "15")]
+    pub stable_memory_storage_page_limits:
+        ::prost::alloc::vec::Vec<super::super::canister_state_bits::v1::StoragePageLimit>,
 }

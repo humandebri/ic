@@ -236,6 +236,7 @@ fn is_supported(api_type: SystemApiCallId, context: &str) -> bool {
         SystemApiCallId::StableRead => vec!["*", "s"],
         SystemApiCallId::Stable64Size => vec!["*", "s"],
         SystemApiCallId::Stable64Grow => vec!["*", "s"],
+        SystemApiCallId::Stable64Shrink => vec!["*", "s"],
         SystemApiCallId::Stable64Write => vec!["*", "s"],
         SystemApiCallId::Stable64Read => vec!["*", "s"],
         SystemApiCallId::RootKeySize => vec!["I", "G", "U", "RQ", "Ry", "Rt", "C", "T"],
@@ -919,6 +920,7 @@ fn api_availability_test(
         | SystemApiCallId::StableSize
         | SystemApiCallId::StableWrite
         | SystemApiCallId::Stable64Grow
+        | SystemApiCallId::Stable64Shrink
         | SystemApiCallId::Stable64Read
         | SystemApiCallId::Stable64Size
         | SystemApiCallId::Stable64Write => {}

@@ -133,6 +133,7 @@ impl Execution {
                 wasm_result,
                 num_instructions_left,
                 allocated_bytes,
+                deallocated_bytes,
                 allocated_guaranteed_response_message_bytes,
                 new_memory_usage,
                 new_message_memory_usage,
@@ -188,6 +189,7 @@ impl Execution {
                                 &stable_memory,
                                 &dirty_page_indices.wasm_memory_delta,
                                 &dirty_page_indices.stable_memory_delta,
+                                system_api.get_min_stable_memory_size_during_execution(),
                             )
                         },
                     );
@@ -206,6 +208,7 @@ impl Execution {
                 let wasm_output = WasmExecutionOutput {
                     wasm_result,
                     allocated_bytes,
+                    deallocated_bytes,
                     allocated_guaranteed_response_message_bytes,
                     new_memory_usage,
                     new_message_memory_usage,
@@ -240,6 +243,7 @@ impl Execution {
                     wasm_result: Err(err),
                     num_instructions_left,
                     allocated_bytes,
+                    deallocated_bytes,
                     allocated_guaranteed_response_message_bytes,
                     new_memory_usage,
                     new_message_memory_usage,

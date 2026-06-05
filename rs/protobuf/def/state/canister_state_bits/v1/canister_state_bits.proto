@@ -430,7 +430,12 @@ message TaskQueue {
   repeated ExecutionTask queue = 3;
 }
 
-// Next ID: 68
+message StoragePageLimit {
+  uint64 max_pages = 1;
+  optional uint64 valid_storage_from_height = 2;
+}
+
+// Next ID: 69
 message CanisterStateBits {
   reserved 1, 2, 3, 5, 6, 9, 10, 14, 16, 17, 24, 30, 35, 42, 47, 48, 49, 52, 53;
 
@@ -520,4 +525,7 @@ message CanisterStateBits {
   map<string, string> environment_variables = 55;
   // Snapshot visibility for the canister.
   SnapshotVisibility snapshot_visibility = 64;
+  // Stable memory shrink generations that decide which checkpoint tail pages
+  // remain visible.
+  repeated StoragePageLimit stable_memory_storage_page_limits = 68;
 }

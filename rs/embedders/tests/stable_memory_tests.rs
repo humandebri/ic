@@ -23,6 +23,12 @@ fn wat_with_imports(wat: &str) -> String {
         (func $ic0_msg_arg_data_size (result i32)))
       (import "ic0" "stable64_grow"
         (func $ic0_stable64_grow (param $pages i64) (result i64)))
+      (import "ic0" "stable64_shrink"
+        (func $ic0_stable64_shrink (param $pages i64) (result i64)))
+      (import "ic0" "stable64_size"
+        (func $ic0_stable64_size (result i64)))
+      (import "ic0" "stable_grow"
+        (func $ic0_stable_grow (param $pages i32) (result i32)))
       (import "ic0" "stable_read"
         (func $ic0_stable_read (param $dst i32) (param $offset i32) (param $size i32)))
       (import "ic0" "stable64_read"
@@ -56,6 +62,61 @@ fn run_test(wat: &str) -> HypervisorResult<Option<WasmResult>> {
         .system_api_mut()
         .unwrap()
         .take_execution_result(run_result.as_ref().err())
+}
+
+#[test]
+fn stable64_shrink_updates_logical_size_and_zeroes_regrown_tail() {
+    let wat = r#"
+      (memory 1)
+      (func (export "canister_update go")
+        ;; Grow two pages and write a non-zero byte into the tail page.
+        (i64.ne (call $ic0_stable64_grow (i64.const 2)) (i64.const 0))
+        (if (then unreachable))
+        (i32.store8 (i32.const 0) (i32.const 42))
+        (call $ic0_stable64_write (i64.const 65536) (i64.const 0) (i64.const 1))
+
+        ;; Shrinking one page returns the old logical size and updates size.
+        (i64.ne (call $ic0_stable64_shrink (i64.const 1)) (i64.const 2))
+        (if (then unreachable))
+        (i64.ne (call $ic0_stable64_size) (i64.const 1))
+        (if (then unreachable))
+
+        ;; Over-shrinking fails with -1 and leaves the logical size unchanged.
+        (i64.ne (call $ic0_stable64_shrink (i64.const 2)) (i64.const -1))
+        (if (then unreachable))
+        (i64.ne (call $ic0_stable64_size) (i64.const 1))
+        (if (then unreachable))
+
+        ;; Shrinking by zero returns the current logical size.
+        (i64.ne (call $ic0_stable64_shrink (i64.const 0)) (i64.const 1))
+        (if (then unreachable))
+
+        ;; Re-growing through the 64-bit API returns the logical old size and
+        ;; exposes zeroes instead of old data.
+        (i64.ne (call $ic0_stable64_grow (i64.const 1)) (i64.const 1))
+        (if (then unreachable))
+        (call $ic0_stable64_read (i64.const 0) (i64.const 65536) (i64.const 1))
+        (i32.ne (i32.load8_u (i32.const 0)) (i32.const 0))
+        (if (then unreachable))
+
+        ;; The 32-bit grow API must observe the same logical size after shrink.
+        (i32.store8 (i32.const 0) (i32.const 99))
+        (call $ic0_stable64_write (i64.const 65536) (i64.const 0) (i64.const 1))
+        (i64.ne (call $ic0_stable64_shrink (i64.const 1)) (i64.const 2))
+        (if (then unreachable))
+        (i32.ne (call $ic0_stable_grow (i32.const 1)) (i32.const 1))
+        (if (then unreachable))
+        (call $ic0_stable64_read (i64.const 0) (i64.const 65536) (i64.const 1))
+        (i32.ne (i32.load8_u (i32.const 0)) (i32.const 0))
+        (if (then unreachable))
+
+        (call $msg_reply)
+      )
+    "#;
+    assert_eq!(
+        run_test(&wat_with_imports(wat)),
+        Ok(Some(WasmResult::Reply(vec![])))
+    );
 }
 
 #[test]

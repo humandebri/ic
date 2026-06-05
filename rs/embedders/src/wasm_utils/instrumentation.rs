@@ -163,6 +163,7 @@ pub(crate) struct InjectedFunctions {
     pub out_of_instructions: u32,
     pub try_grow_wasm_memory: u32,
     pub try_grow_stable_memory: u32,
+    pub try_shrink_stable_memory: u32,
     pub internal_trap: u32,
     pub stable_read_first_access: u32,
 }
@@ -711,12 +712,14 @@ const INSTRUMENTED_FUN_MODULE: &str = "__";
 const OUT_OF_INSTRUCTIONS_FUN_NAME: &str = "out_of_instructions";
 const TRY_GROW_WASM_MEMORY_FUN_NAME: &str = "try_grow_wasm_memory";
 const TRY_GROW_STABLE_MEMORY_FUN_NAME: &str = "try_grow_stable_memory";
+const TRY_SHRINK_STABLE_MEMORY_FUN_NAME: &str = "try_shrink_stable_memory";
 const INTERNAL_TRAP_FUN_NAME: &str = "internal_trap";
 const STABLE_READ_FIRST_ACCESS_NAME: &str = "stable_read_first_access";
 const TABLE_STR: &str = "table";
 pub(crate) const INSTRUCTIONS_COUNTER_GLOBAL_NAME: &str = "canister counter_instructions";
 pub(crate) const DIRTY_PAGES_COUNTER_GLOBAL_NAME: &str = "canister counter_dirty_pages";
 pub(crate) const ACCESSED_PAGES_COUNTER_GLOBAL_NAME: &str = "canister counter_accessed_pages";
+pub(crate) const STABLE_MEMORY_SIZE_GLOBAL_NAME: &str = "canister stable_memory_size";
 const CANISTER_START_STR: &str = "canister_start";
 
 /// There is one byte for each OS page in the memory.
@@ -767,6 +770,15 @@ fn inject_helper_functions(
         tgsm_type_idx,
     );
 
+    let tssm_type_idx = module
+        .types
+        .add_func_type(&[DataType::I64, DataType::I64], &[DataType::I64]);
+    let (try_shrink_stable_memory_fn_id, _) = module.add_import_func(
+        INSTRUMENTED_FUN_MODULE.to_string(),
+        TRY_SHRINK_STABLE_MEMORY_FUN_NAME.to_string(),
+        tssm_type_idx,
+    );
+
     let it_type_idx = module.types.add_func_type(&[DataType::I32], &[]);
     let (internal_trap_fn_id, _) = module.add_import_func(
         INSTRUMENTED_FUN_MODULE.to_string(),
@@ -787,6 +799,7 @@ fn inject_helper_functions(
         out_of_instructions: *out_of_instructions_fn_id,
         try_grow_wasm_memory: *try_grow_wasm_memory_fn_id,
         try_grow_stable_memory: *try_grow_stable_memory_fn_id,
+        try_shrink_stable_memory: *try_shrink_stable_memory_fn_id,
         internal_trap: *internal_trap_fn_id,
         stable_read_first_access: *stable_read_first_access_fn_id,
     }
@@ -797,6 +810,7 @@ pub(super) struct InjectedCounters {
     pub instructions_counter: u32,
     pub dirty_pages_counter: u32,
     pub accessed_pages_counter: u32,
+    pub stable_memory_size: u32,
     /// Function to decrement the instruction counter.
     pub decr_instruction_counter_fn: u32,
     /// Function to count clean pages.
@@ -948,6 +962,13 @@ fn export_additional_symbols<'a>(
 
     // push the accessed page counter
     let accessed_pages_counter = *module.add_global(
+        InitExpr::new(vec![InitInstr::Value(Value::I64(0))]),
+        DataType::I64,
+        true,
+        false,
+    );
+
+    let stable_memory_size = *module.add_global(
         InitExpr::new(vec![InitInstr::Value(Value::I64(0))]),
         DataType::I64,
         true,
@@ -1125,6 +1146,12 @@ fn export_additional_symbols<'a>(
         accessed_pages_counter,
     );
 
+    debug_assert!(super::validation::RESERVED_SYMBOLS.contains(&STABLE_MEMORY_SIZE_GLOBAL_NAME));
+    module.exports.add_export_global(
+        STABLE_MEMORY_SIZE_GLOBAL_NAME.to_string(),
+        stable_memory_size,
+    );
+
     if let Some(index) = module.start.map(|s| s.0) {
         // push canister_start
         debug_assert!(super::validation::RESERVED_SYMBOLS.contains(&CANISTER_START_STR));
@@ -1138,6 +1165,7 @@ fn export_additional_symbols<'a>(
             instructions_counter,
             dirty_pages_counter,
             accessed_pages_counter,
+            stable_memory_size,
             decr_instruction_counter_fn: *decr_instruction_counter_fn_id,
             count_clean_pages_fn: *count_clean_pages_fn_id,
         },

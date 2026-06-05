@@ -1,7 +1,9 @@
 use crate::{
     CRITICAL_ERROR_CHUNK_ID_USAGE_NEARING_LIMITS, CheckpointError, NUMBER_OF_CHECKPOINT_THREADS,
     PageMapType, SharedState, StateManagerMetrics,
-    checkpoint::validate_and_finalize_checkpoint_and_remove_unverified_marker,
+    checkpoint::{
+        PageMapTypeWithLimit, validate_and_finalize_checkpoint_and_remove_unverified_marker,
+    },
     compute_bundled_manifest,
     manifest::{BaseManifestInfo, RehashManifest},
     release_lock_and_persist_metadata,
@@ -125,7 +127,7 @@ pub(crate) enum TipRequest {
     /// State: `tip_folder_state = latest_checkpoint_state`
     ResetTipAndMerge {
         checkpoint_layout: CheckpointLayout<ReadOnly>,
-        pagemaptypes: Vec<PageMapType>,
+        pagemaptypes: Vec<PageMapTypeWithLimit>,
     },
     /// Compute manifest, store result into states and persist metadata as result.
     ///
@@ -811,7 +813,7 @@ impl StorageInfo {
 
 fn merge_candidates_and_storage_info(
     tip_handler: &mut TipHandler,
-    pagemaptypes: &[PageMapType],
+    pagemaptypes: &[PageMapTypeWithLimit],
     height: Height,
     thread_pool: &mut scoped_threadpool::Pool,
     lsmt_config: &LsmtConfig,
@@ -825,23 +827,29 @@ fn merge_candidates_and_storage_info(
         parallel_map(
             thread_pool,
             pagemaptypes.iter(),
-            |page_map_type| -> StorageResult<(Vec<MergeCandidate>, StorageInfo)> {
+            |page_map_type_with_limit| -> StorageResult<(Vec<MergeCandidate>, StorageInfo)> {
                 let mut storage_info = StorageInfo {
                     disk_size: 0,
                     mem_size: 0,
                 };
-                let pm_layout = page_map_type
+                let pm_layout = page_map_type_with_limit
+                    .page_map_type
                     .layout(layout)
                     .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send>)?;
                 storage_info.disk_size +=
                     (&pm_layout as &dyn StorageLayout).storage_size_bytes()?;
-                let num_pages = (&pm_layout as &dyn StorageLayout).memory_size_pages()?;
-                storage_info.mem_size += (num_pages * PAGE_SIZE) as u64;
+                let physical_num_pages = (&pm_layout as &dyn StorageLayout).memory_size_pages()?;
+                let visible_logical_num_pages =
+                    physical_num_pages.min(page_map_type_with_limit.visible_logical_num_pages);
+                storage_info.mem_size += (visible_logical_num_pages * PAGE_SIZE) as u64;
                 Ok((
                     MergeCandidate::new(
                         &pm_layout,
                         height,
-                        num_pages as u64,
+                        // Merge still scans the physical page range. Storage page limits decide
+                        // which tail pages are visible; accounting uses the logical page count.
+                        physical_num_pages as u64,
+                        page_map_type_with_limit.storage_page_limits.clone(),
                         lsmt_config,
                         &metrics.storage_metrics,
                     )?,
@@ -916,7 +924,7 @@ fn merge_candidates_and_storage_info(
 /// further increase the amount of data written in order to enforce the storage overhead.
 fn merge(
     tip_handler: &mut TipHandler,
-    pagemaptypes: &[PageMapType],
+    pagemaptypes: &[PageMapTypeWithLimit],
     height: Height,
     thread_pool: &mut scoped_threadpool::Pool,
     log: &ReplicaLogger,
@@ -1248,6 +1256,12 @@ fn serialize_canister_protos_to_checkpoint_readwrite(
                 .as_ref()
                 .map(|es| es.stable_memory.size)
                 .unwrap_or_else(|| NumWasmPages::from(0)),
+            stable_memory_storage_page_limits: canister_state
+                .execution_state
+                .as_ref()
+                .map_or_else(Vec::new, |es| {
+                    es.stable_memory.page_map.storage_page_limits().to_vec()
+                }),
             heap_delta_debit: canister_state.scheduler_state.heap_delta_debit,
             install_code_debit: canister_state.scheduler_state.install_code_debit,
             time_of_last_allocation_charge_nanos: canister_state
@@ -1327,6 +1341,11 @@ fn serialize_snapshot_protos_to_checkpoint_readwrite(
             certified_data: canister_snapshot.certified_data().clone(),
             wasm_chunk_store_metadata: canister_snapshot.chunk_store().metadata().clone(),
             stable_memory_size: canister_snapshot.stable_memory().size,
+            stable_memory_storage_page_limits: canister_snapshot
+                .stable_memory()
+                .page_map
+                .storage_page_limits()
+                .to_vec(),
             wasm_memory_size: canister_snapshot.wasm_memory().size,
             total_size: canister_snapshot.size(),
             exported_globals: canister_snapshot.exported_globals().clone(),

@@ -510,6 +510,11 @@ fn try_apply_canister_state_changes(
     metrics: &HypervisorMetrics,
     log: &ReplicaLogger,
 ) -> HypervisorResult<RequestMetadataStats> {
+    subnet_available_memory.increment(
+        output.deallocated_bytes,
+        NumBytes::from(0),
+        NumBytes::from(0),
+    );
     subnet_available_memory
         .try_decrement(
             output.allocated_bytes,
@@ -795,6 +800,7 @@ mod test {
                 wasm_result: Ok(None),
                 num_instructions_left: NumInstructions::from(0),
                 allocated_bytes: NumBytes::from(0),
+                deallocated_bytes: NumBytes::from(0),
                 allocated_guaranteed_response_message_bytes: NumBytes::from(0),
                 new_memory_usage: None,
                 new_message_memory_usage: None,

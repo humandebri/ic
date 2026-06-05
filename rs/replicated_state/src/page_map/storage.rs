@@ -13,7 +13,7 @@ use std::{
 use crate::page_map::{
     CheckpointSerialization, LABEL_OP_FLUSH, LABEL_OP_MERGE, LABEL_TYPE_INDEX,
     LABEL_TYPE_PAGE_DATA, MappingSerialization, MemoryInstruction, MemoryInstructions,
-    MemoryMapOrData, PageDelta, PersistenceError, StorageMetrics,
+    MemoryMapOrData, PageDelta, PageMap, PersistenceError, StorageMetrics, StoragePageLimit,
     checkpoint::{Checkpoint, Mapping, ZEROED_PAGE},
 };
 
@@ -214,6 +214,10 @@ impl Storage {
         self.init_or_die().get_page(page_index)
     }
 
+    pub fn get_page_from_height(&self, page_index: PageIndex, height: Height) -> &PageBytes {
+        self.init_or_die().get_page_from_height(page_index, height)
+    }
+
     pub fn get_base_memory_instructions(&self) -> MemoryInstructions<'_> {
         self.init_or_die().get_base_memory_instructions()
     }
@@ -222,12 +226,27 @@ impl Storage {
         &self,
         range: Range<PageIndex>,
         filter: &mut BitVec,
+        min_overlay_height: Option<Height>,
     ) -> MemoryInstructions<'_> {
-        self.init_or_die().get_memory_instructions(range, filter)
+        self.init_or_die()
+            .get_memory_instructions(range, filter, min_overlay_height)
+    }
+
+    pub fn get_memory_instructions_from_height(
+        &self,
+        range: Range<PageIndex>,
+        height: Height,
+    ) -> MemoryInstructions<'_> {
+        self.init_or_die()
+            .get_memory_instructions_from_height(range, height)
     }
 
     pub fn num_logical_pages(&self) -> usize {
         self.init_or_die().num_logical_pages()
+    }
+
+    pub fn num_logical_pages_from_height(&self, height: Height) -> usize {
+        self.init_or_die().num_logical_pages_from_height(height)
     }
 
     pub fn serialize(&self) -> StorageSerialization {
@@ -266,7 +285,14 @@ impl StorageImpl {
         let mut base_overlays = Vec::<OverlayFile>::new();
         let mut overlays = Vec::<OverlayFile>::new();
         for path in overlay_paths.iter() {
-            let overlay = OverlayFile::load(path)?;
+            let overlay_height = storage_layout.overlay_height(path).map_err(|err| {
+                PersistenceError::FileSystemError {
+                    path: path.display().to_string(),
+                    context: "Failed to get overlay height".to_string(),
+                    internal_error: err.to_string(),
+                }
+            })?;
+            let overlay = OverlayFile::load_with_height(path, Some(overlay_height))?;
             let start_page_index = overlay
                 .index_iter()
                 .next()
@@ -331,6 +357,26 @@ impl StorageImpl {
         }
     }
 
+    pub fn get_page_from_height(&self, page_index: PageIndex, height: Height) -> &PageBytes {
+        let from_overlays = self
+            .overlays
+            .iter()
+            .rev()
+            .filter(|overlay| overlay.is_at_or_after(height))
+            .find_map(|overlay| overlay.get_page(page_index));
+        match from_overlays {
+            Some(bytes) => bytes,
+            None => match &self.base {
+                BaseFile::Base(_) => &ZEROED_PAGE,
+                BaseFile::Overlay(overlays) => overlays
+                    .iter()
+                    .filter(|overlay| overlay.is_at_or_after(height))
+                    .find_map(|overlay| overlay.get_page(page_index))
+                    .unwrap_or(&ZEROED_PAGE),
+            },
+        }
+    }
+
     /// For base overlays and regular base we pre-mmap all data in constructor.
     pub fn get_base_memory_instructions(&self) -> MemoryInstructions<'_> {
         match &self.base {
@@ -354,10 +400,13 @@ impl StorageImpl {
         &self,
         range: Range<PageIndex>,
         filter: &mut BitVec,
+        min_overlay_height: Option<Height>,
     ) -> MemoryInstructions<'_> {
         let mut result = Vec::<MemoryInstruction>::new();
 
-        for overlay in self.overlays.iter().rev() {
+        for overlay in self.overlays.iter().rev().filter(|overlay| {
+            min_overlay_height.is_none_or(|height| overlay.is_at_or_after(height))
+        }) {
             // The order within the same overlay doesn't matter as they are nonoverlapping.
             result.append(&mut overlay.get_memory_instructions(range.clone(), filter));
         }
@@ -366,6 +415,35 @@ impl StorageImpl {
         // If multiple overlays contain instructions for the same page, the newest overlay's
         // data will end up in the buffer after applying the instructions in order.
         result.reverse();
+        MemoryInstructions {
+            range,
+            instructions: result,
+        }
+    }
+
+    pub(crate) fn get_memory_instructions_from_height(
+        &self,
+        range: Range<PageIndex>,
+        height: Height,
+    ) -> MemoryInstructions<'_> {
+        let mut filter = BitVec::from_elem((range.end.get() - range.start.get()) as usize, false);
+        let mut result = self
+            .get_memory_instructions(range.clone(), &mut filter, Some(height))
+            .instructions;
+        if let BaseFile::Overlay(overlays) = &self.base {
+            let mut base_overlay_instructions = Vec::new();
+            for overlay in overlays
+                .iter()
+                .rev()
+                .filter(|overlay| overlay.is_at_or_after(height))
+            {
+                base_overlay_instructions
+                    .append(&mut overlay.get_memory_instructions(range.clone(), &mut filter));
+            }
+            base_overlay_instructions.reverse();
+            base_overlay_instructions.extend(result);
+            result = base_overlay_instructions;
+        }
         MemoryInstructions {
             range,
             instructions: result,
@@ -385,6 +463,26 @@ impl StorageImpl {
         let overlays = self
             .overlays
             .iter()
+            .map(|overlay| overlay.end_logical_pages())
+            .max()
+            .unwrap_or(0);
+        base.max(overlays)
+    }
+
+    pub(crate) fn num_logical_pages_from_height(&self, height: Height) -> usize {
+        let base = match &self.base {
+            BaseFile::Base(_) => 0,
+            BaseFile::Overlay(overlays) => overlays
+                .iter()
+                .filter(|overlay| overlay.is_at_or_after(height))
+                .map(|o| o.end_logical_pages())
+                .max()
+                .unwrap_or(0),
+        };
+        let overlays = self
+            .overlays
+            .iter()
+            .filter(|overlay| overlay.is_at_or_after(height))
             .map(|overlay| overlay.end_logical_pages())
             .max()
             .unwrap_or(0);
@@ -416,6 +514,7 @@ pub struct OverlayFile {
     /// A memory map of the entire file.
     /// Invariant: `mapping` satisfies `check_correctness(&mapping)`.
     mapping: Arc<Mapping>,
+    height: Option<Height>,
 }
 
 impl OverlayFile {
@@ -494,6 +593,10 @@ impl OverlayFile {
     /// Returns an error if disk operations fail or the file does not have the format of an
     /// overlay file.
     pub fn load(path: &Path) -> Result<Self, PersistenceError> {
+        Self::load_with_height(path, None)
+    }
+
+    pub fn load_with_height(path: &Path, height: Option<Height>) -> Result<Self, PersistenceError> {
         let file = OpenOptions::new().read(true).open(path).map_err(|err| {
             PersistenceError::FileSystemError {
                 path: path.display().to_string(),
@@ -519,6 +622,7 @@ impl OverlayFile {
 
         Ok(Self {
             mapping: Arc::new(mapping),
+            height,
         })
     }
 
@@ -526,6 +630,7 @@ impl OverlayFile {
     pub fn serialize(&self) -> OverlayFileSerialization {
         OverlayFileSerialization {
             mapping: self.mapping.serialize(),
+            height: self.height.map(|height| height.get()),
         }
     }
 
@@ -544,7 +649,13 @@ impl OverlayFile {
 
         Ok(Self {
             mapping: Arc::new(mapping),
+            height: serialized_overlay.height.map(Height::new),
         })
+    }
+
+    fn is_at_or_after(&self, height: Height) -> bool {
+        self.height
+            .is_none_or(|overlay_height| overlay_height >= height)
     }
 
     /// Number of pages in this overlay file containing data.
@@ -1061,7 +1172,7 @@ enum MergeDestination {
 #[derive(Clone, Debug)]
 pub struct MergeCandidate {
     /// Overlay files to merge.
-    overlays: Vec<PathBuf>,
+    overlays: Vec<OverlayPath>,
     /// Base to merge if any.
     base: Option<PathBuf>,
     /// File to create. The format is based on `MergeDestination` variant, either `Base` or
@@ -1071,6 +1182,7 @@ pub struct MergeCandidate {
     /// Range of pages covered by this MergeCandidate.
     start_page: PageIndex,
     end_page: PageIndex,
+    storage_page_limits: Vec<StoragePageLimit>,
 
     /// Number of overlays for this shard. Can be larger then `overlays.len() + base.len()` for a
     /// parital merge.
@@ -1080,6 +1192,12 @@ pub struct MergeCandidate {
     storage_size_bytes_before: u64,
     /// Size of input files, i.e. size to read from disk during merge.
     input_size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OverlayPath {
+    path: PathBuf,
+    height: Height,
 }
 
 /// Number of shards to serialize `num_pages` worth of data.
@@ -1093,6 +1211,19 @@ fn num_shards(num_pages: u64, lsmt_config: &LsmtConfig) -> u64 {
 }
 
 impl MergeCandidate {
+    fn overlay_paths_with_heights(
+        layout: &dyn StorageLayout,
+        overlays: Vec<PathBuf>,
+    ) -> StorageResult<Vec<OverlayPath>> {
+        overlays
+            .into_iter()
+            .map(|path| {
+                let height = layout.overlay_height(&path)?;
+                Ok(OverlayPath { path, height })
+            })
+            .collect()
+    }
+
     /// Size of page map covered by all the input files related to the shard; total size of
     /// page_map for `split_to_shards`
     pub fn page_map_size_bytes(&self) -> u64 {
@@ -1154,13 +1285,21 @@ impl MergeCandidate {
         layout: &dyn StorageLayout,
         height: Height,
         num_pages: u64,
+        storage_page_limits: Vec<StoragePageLimit>,
         lsmt_config: &LsmtConfig,
         metrics: &StorageMetrics,
     ) -> StorageResult<Vec<MergeCandidate>> {
         if layout.base().exists() && num_pages > lsmt_config.shard_num_pages {
-            Self::split_to_shards(layout, height, num_pages, lsmt_config)
+            Self::split_to_shards(layout, height, num_pages, storage_page_limits, lsmt_config)
         } else {
-            Self::merge_by_shard(layout, height, num_pages, lsmt_config, metrics)
+            Self::merge_by_shard(
+                layout,
+                height,
+                num_pages,
+                storage_page_limits,
+                lsmt_config,
+                metrics,
+            )
         }
     }
 
@@ -1168,7 +1307,16 @@ impl MergeCandidate {
     pub fn merge_to_base(
         layout: &dyn StorageLayout,
         num_pages: u64,
+        storage_page_limits: Vec<StoragePageLimit>,
     ) -> StorageResult<Option<MergeCandidate>> {
+        if !storage_page_limits.is_empty() {
+            return Err(Box::new(PersistenceError::FileSystemError {
+                path: layout.base().display().to_string(),
+                context: "Cannot merge active storage page limit into a heightless base file"
+                    .to_string(),
+                internal_error: "stable memory storage page limit is active".to_string(),
+            }));
+        }
         let existing_overlays = layout.existing_overlays()?;
         let base_path = layout.base();
         if existing_overlays.is_empty() {
@@ -1176,7 +1324,7 @@ impl MergeCandidate {
         } else {
             let storage_size = layout.storage_size_bytes()?;
             Ok(Some(MergeCandidate {
-                overlays: existing_overlays.to_vec(),
+                overlays: Self::overlay_paths_with_heights(layout, existing_overlays)?,
                 base: if base_path.exists() {
                     Some(base_path.clone())
                 } else {
@@ -1185,6 +1333,7 @@ impl MergeCandidate {
                 dst: MergeDestination::BaseFile(base_path),
                 start_page: PageIndex::new(0),
                 end_page: PageIndex::new(num_pages),
+                storage_page_limits,
                 num_files_before: layout.existing_files()?.len() as u64,
                 storage_size_bytes_before: storage_size,
                 input_size_bytes: storage_size,
@@ -1217,16 +1366,18 @@ impl MergeCandidate {
         let overlays: Vec<OverlayFile> = self
             .overlays
             .iter()
-            .map(|path| OverlayFile::load(path))
+            .map(|overlay| OverlayFile::load_with_height(&overlay.path, Some(overlay.height)))
             .collect::<Result<Vec<_>, PersistenceError>>()?;
-        for path in &self.overlays {
-            std::fs::remove_file(path).map_err(|io_err| PersistenceError::FileSystemError {
-                path: path.display().to_string(),
-                context: "Could not remove overlay file before merge".to_string(),
-                internal_error: io_err.to_string(),
+        for overlay in &self.overlays {
+            std::fs::remove_file(&overlay.path).map_err(|io_err| {
+                PersistenceError::FileSystemError {
+                    path: overlay.path.display().to_string(),
+                    context: "Could not remove overlay file before merge".to_string(),
+                    internal_error: io_err.to_string(),
+                }
             })?;
         }
-        let pages_with_indices = Self::merge_data(&base, &overlays);
+        let pages_with_indices = Self::merge_data(&base, &overlays, &self.storage_page_limits);
 
         let (num_output_shards, shard_num_pages) = match &self.dst {
             MergeDestination::MultiShardOverlay {
@@ -1290,6 +1441,7 @@ impl MergeCandidate {
         layout: &dyn StorageLayout,
         height: Height,
         num_pages: u64,
+        storage_page_limits: Vec<StoragePageLimit>,
         lsmt_config: &LsmtConfig,
     ) -> StorageResult<Vec<MergeCandidate>> {
         let dst_overlays: Vec<_> = (0..num_shards(num_pages, lsmt_config))
@@ -1312,7 +1464,7 @@ impl MergeCandidate {
         };
         let storage_size = layout.storage_size_bytes()?;
         Ok(vec![MergeCandidate {
-            overlays: layout.existing_overlays()?,
+            overlays: Self::overlay_paths_with_heights(layout, layout.existing_overlays()?)?,
             base,
             dst: MergeDestination::MultiShardOverlay {
                 shard_paths: dst_overlays,
@@ -1320,6 +1472,7 @@ impl MergeCandidate {
             },
             start_page: PageIndex::new(0),
             end_page: PageIndex::new(num_pages),
+            storage_page_limits,
             num_files_before: layout.existing_files()?.len() as u64,
             storage_size_bytes_before: storage_size,
             input_size_bytes: storage_size,
@@ -1332,6 +1485,7 @@ impl MergeCandidate {
         layout: &dyn StorageLayout,
         height: Height,
         num_pages: u64,
+        storage_page_limits: Vec<StoragePageLimit>,
         lsmt_config: &LsmtConfig,
         metrics: &StorageMetrics,
     ) -> StorageResult<Vec<MergeCandidate>> {
@@ -1403,6 +1557,7 @@ impl MergeCandidate {
                 .skip(existing_overlays.len().saturating_sub(num_files_to_merge))
                 .cloned()
                 .collect();
+            let overlays = Self::overlay_paths_with_heights(layout, overlays)?;
 
             // Merge all existing files and put all the data into a single base file.
             // Otherwise we create an overlay file.
@@ -1417,6 +1572,7 @@ impl MergeCandidate {
                 dst: MergeDestination::SingleShardOverlay(layout.overlay(height, shard)),
                 start_page,
                 end_page,
+                storage_page_limits: storage_page_limits.clone(),
                 num_files_before: existing_files.len() as u64,
                 storage_size_bytes_before: file_lengths.iter().sum(),
                 input_size_bytes,
@@ -1428,6 +1584,7 @@ impl MergeCandidate {
     fn merge_data<'a>(
         existing_base: &'a Option<Checkpoint>,
         existing: &'a [OverlayFile],
+        storage_page_limits: &'a [StoragePageLimit],
     ) -> Vec<(PageIndex, &'a [u8])> {
         struct PageWithPriority<'a> {
             // Page index in the `PageMap`.
@@ -1437,32 +1594,51 @@ impl MergeCandidate {
             priority: usize,
         }
 
-        let iterators_with_priority: Vec<Box<dyn Iterator<Item = PageWithPriority>>> = existing
-            .iter()
-            .rev()
-            .enumerate()
-            .map(|(priority, overlay)| {
-                Box::new(
-                    overlay
-                        .iter()
-                        .map(move |(page_index, page_data)| PageWithPriority {
-                            page_index,
-                            page_data,
-                            priority,
-                        }),
-                ) as Box<dyn Iterator<Item = PageWithPriority>>
-            })
-            .chain(existing_base.as_ref().map(|checkpoint| {
-                Box::new((0..checkpoint.num_pages()).map(move |index| {
-                    let page_index = PageIndex::new(index as u64);
-                    PageWithPriority {
-                        page_index,
-                        page_data: checkpoint.get_page(page_index).as_slice(),
-                        priority: existing.len(),
-                    }
-                })) as Box<dyn Iterator<Item = PageWithPriority>>
-            }))
-            .collect();
+        let iterators_with_priority: Vec<Box<dyn Iterator<Item = PageWithPriority> + 'a>> =
+            existing
+                .iter()
+                .rev()
+                .enumerate()
+                .map(|(priority, overlay)| {
+                    Box::new(
+                        overlay
+                            .iter()
+                            .filter(move |(page_index, _)| {
+                                PageMap::storage_limit_for_page(storage_page_limits, *page_index)
+                                    .is_none_or(|limit| {
+                                        limit
+                                            .valid_storage_from_height
+                                            .is_some_and(|height| overlay.is_at_or_after(height))
+                                    })
+                            })
+                            .map(move |(page_index, page_data)| PageWithPriority {
+                                page_index,
+                                page_data,
+                                priority,
+                            }),
+                    ) as Box<dyn Iterator<Item = PageWithPriority> + 'a>
+                })
+                .chain(existing_base.as_ref().map(|checkpoint| {
+                    Box::new(
+                        (0..checkpoint.num_pages())
+                            .map(move |index| {
+                                let page_index = PageIndex::new(index as u64);
+                                PageWithPriority {
+                                    page_index,
+                                    page_data: checkpoint.get_page(page_index).as_slice(),
+                                    priority: existing.len(),
+                                }
+                            })
+                            .filter(move |page| {
+                                PageMap::storage_limit_for_page(
+                                    storage_page_limits,
+                                    page.page_index,
+                                )
+                                .is_none()
+                            }),
+                    ) as Box<dyn Iterator<Item = PageWithPriority> + 'a>
+                }))
+                .collect();
 
         // Sort all iterators by `(page_index, priority)`. All sub-iterators in `iterators_with_priority`
         // are sorted by `page_index` and have the same priority. So all the sub-iterators are sorted
@@ -1810,6 +1986,8 @@ pub struct StorageSerialization {
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct OverlayFileSerialization {
     pub mapping: MappingSerialization,
+    #[serde(default)]
+    pub height: Option<u64>,
 }
 
 #[cfg(any(test, feature = "fuzzing_code"))]

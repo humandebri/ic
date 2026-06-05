@@ -1059,7 +1059,7 @@ pub fn syscalls<
                   current_size: i64,
                   additional_pages: i64,
                   stable_memory_api: i32| {
-                charge_for_cpu(&mut caller, overhead_native::STABLE_GROW)?;
+                charge_for_cpu(&mut caller, overhead_native::STABLE_GROW_OR_SHRINK)?;
                 let exported_stable_memory = caller
                     .get_export(STABLE_MEMORY_NAME)
                     .and_then(|ext| ext.into_memory())
@@ -1357,6 +1357,20 @@ pub fn syscalls<
         })
         .unwrap();
 
+    linker
+        .func_wrap("__", "try_shrink_stable_memory", {
+            move |mut caller: Caller<'_, StoreData>, current_size: i64, removed_pages: i64| {
+                charge_for_cpu(&mut caller, overhead_native::STABLE_GROW_OR_SHRINK)?;
+                with_system_api(&mut caller, |s| {
+                    match s.try_shrink_stable_memory(current_size as u64, removed_pages as u64)? {
+                        StableGrowOutcome::Success => Ok(current_size),
+                        StableGrowOutcome::Failure => Ok(-1),
+                    }
+                })
+            }
+        })
+        .unwrap();
+
     // Stable memory APIs are implemented natively in Wasm. Link the functions here to dummy
     // versions that will trap if ever called to satisfy the Wasm module requirements (the alternative
     // would be to change the imports in the Wasm to link to a dummy function but this approach here
@@ -1448,6 +1462,20 @@ pub fn syscalls<
                     &mut caller,
                     HypervisorError::CalledTrap {
                         message: "ic0.stable64_grow is implemented natively in Wasm".to_string(),
+                        backtrace: None,
+                    },
+                ))
+            }
+        })
+        .unwrap();
+
+    linker
+        .func_wrap("ic0", "stable64_shrink", {
+            move |mut caller: Caller<'_, StoreData>, _pages: u64| -> Result<u64, _> {
+                Err(process_err(
+                    &mut caller,
+                    HypervisorError::CalledTrap {
+                        message: "ic0.stable64_shrink is implemented natively in Wasm".to_string(),
                         backtrace: None,
                     },
                 ))

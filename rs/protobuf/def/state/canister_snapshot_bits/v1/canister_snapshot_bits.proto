@@ -25,4 +25,5 @@ message CanisterSnapshotBits {
   CanisterTimer global_timer = 12;
   optional canister_state_bits.v1.OnLowWasmMemoryHookStatus on_low_wasm_memory_hook_status = 13;
   canister_state_bits.v1.SnapshotSource source = 14;
+  repeated canister_state_bits.v1.StoragePageLimit stable_memory_storage_page_limits = 15;
 }

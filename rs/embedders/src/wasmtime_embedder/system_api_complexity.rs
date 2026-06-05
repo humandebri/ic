@@ -83,6 +83,7 @@ pub mod overhead {
     pub const STABLE_SIZE: NumInstructions = NumInstructions::new(20);
     pub const STABLE_WRITE: NumInstructions = NumInstructions::new(20);
     pub const STABLE64_GROW: NumInstructions = NumInstructions::new(500);
+    pub const STABLE64_SHRINK: NumInstructions = NumInstructions::new(500);
     pub const STABLE64_READ: NumInstructions = NumInstructions::new(20);
     pub const STABLE64_SIZE: NumInstructions = NumInstructions::new(20);
     pub const STABLE64_WRITE: NumInstructions = NumInstructions::new(20);
@@ -98,8 +99,7 @@ pub mod overhead {
 
 pub mod overhead_native {
     use ic_types::NumInstructions;
-    // Both for `stable_grow` and `stable64_grow`.
-    pub const STABLE_GROW: NumInstructions = NumInstructions::new(100);
+    pub const STABLE_GROW_OR_SHRINK: NumInstructions = NumInstructions::new(100);
     pub const STABLE_READ: NumInstructions = NumInstructions::new(20);
     pub const STABLE_WRITE: NumInstructions = NumInstructions::new(20);
     pub const STABLE64_READ: NumInstructions = NumInstructions::new(20);

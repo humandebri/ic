@@ -159,6 +159,7 @@ impl Segments {
 enum SystemApiFunc {
     StableGrow,
     Stable64Grow,
+    Stable64Shrink,
     StableSize,
     Stable64Size,
     StableRead,
@@ -172,6 +173,7 @@ impl SystemApiFunc {
         match name {
             "stable_grow" => Some(Self::StableGrow),
             "stable64_grow" => Some(Self::Stable64Grow),
+            "stable64_shrink" => Some(Self::Stable64Shrink),
             "stable_size" => Some(Self::StableSize),
             "stable64_size" => Some(Self::Stable64Size),
             "stable_read" => Some(Self::StableRead),

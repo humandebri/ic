@@ -1070,7 +1070,7 @@ fn initialize_tip(
     tip_channel
         .send(TipRequest::ResetTipAndMerge {
             checkpoint_layout,
-            pagemaptypes: PageMapType::list_all(&snapshot.state),
+            pagemaptypes: PageMapType::list_all_with_limits(&snapshot.state),
         })
         .unwrap();
     ReplicatedState::clone(&snapshot.state)
@@ -2634,7 +2634,7 @@ impl StateManagerImpl {
                 .start_timer();
             let tip_requests = vec![TipRequest::ResetTipAndMerge {
                 checkpoint_layout: cp_layout.clone(),
-                pagemaptypes: PageMapType::list_all(&state),
+                pagemaptypes: PageMapType::list_all_with_limits(&state),
             }];
 
             CreateCheckpointResult {

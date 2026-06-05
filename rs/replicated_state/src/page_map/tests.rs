@@ -1,6 +1,7 @@
 use super::{
     Buffer, FileDescriptor, MemoryInstructions, MemoryMapOrData, PageAllocatorRegistry, PageIndex,
-    PageMap, PageMapSerialization, Shard, StorageMetrics, TestPageAllocatorFileDescriptorImpl,
+    PageMap, PageMapSerialization, Shard, StorageMetrics, StoragePageLimit,
+    TestPageAllocatorFileDescriptorImpl,
     checkpoint::Checkpoint,
     page_allocator::PageAllocatorSerialization,
     storage::BaseFileSerialization,
@@ -23,6 +24,153 @@ fn assert_equal_page_maps(page_map1: &PageMap, page_map2: &PageMap) {
             page_map2.get_page(PageIndex::new(i as u64))
         );
     }
+}
+
+#[test]
+fn storage_page_limit_hides_old_tail_but_keeps_new_overlay_tail() {
+    let metrics = StorageMetrics::new(&MetricsRegistry::new());
+    let lsmt_config = LsmtConfig {
+        shard_num_pages: u64::MAX,
+    };
+    let tempdir = Builder::new().prefix("page_map_test").tempdir().unwrap();
+    let storage_layout = ShardedTestStorageLayout {
+        dir_path: tempdir.path().to_path_buf(),
+        base: tempdir.path().join("vmemory_0.bin"),
+        overlay_suffix: "vmemory_0.overlay".into(),
+    };
+
+    let mut page_map = PageMap::new_for_testing();
+    let old_pages: Vec<_> = (0..4)
+        .map(|i| (PageIndex::new(i), &[1_u8; PAGE_SIZE]))
+        .collect();
+    page_map.update(&old_pages);
+    page_map
+        .persist_unflushed_delta(&storage_layout, Height::new(0), &lsmt_config, &metrics)
+        .unwrap();
+    page_map.strip_unflushed_delta(Height::new(0));
+
+    let new_pages = vec![(PageIndex::new(3), &[2_u8; PAGE_SIZE])];
+    page_map.update(&new_pages);
+    page_map
+        .persist_unflushed_delta(&storage_layout, Height::new(1), &lsmt_config, &metrics)
+        .unwrap();
+
+    let mut page_map = PageMap::open(
+        Box::new(storage_layout),
+        Arc::new(TestPageAllocatorFileDescriptorImpl::new()),
+    )
+    .unwrap();
+    page_map.set_storage_page_limits(vec![StoragePageLimit {
+        max_pages: 2,
+        valid_storage_from_height: Some(Height::new(1)),
+    }]);
+
+    assert_eq!(page_map.num_host_pages(), 4);
+    assert_eq!(page_map.get_page(PageIndex::new(1)), &[1_u8; PAGE_SIZE]);
+    assert_eq!(page_map.get_page(PageIndex::new(2)), &[0_u8; PAGE_SIZE]);
+    assert_eq!(page_map.get_page(PageIndex::new(3)), &[2_u8; PAGE_SIZE]);
+}
+
+#[test]
+fn storage_page_limits_keep_regrown_page_across_later_shrink() {
+    let metrics = StorageMetrics::new(&MetricsRegistry::new());
+    let lsmt_config = LsmtConfig {
+        shard_num_pages: u64::MAX,
+    };
+    let tempdir = Builder::new().prefix("page_map_test").tempdir().unwrap();
+    let storage_layout = ShardedTestStorageLayout {
+        dir_path: tempdir.path().to_path_buf(),
+        base: tempdir.path().join("vmemory_0.bin"),
+        overlay_suffix: "vmemory_0.overlay".into(),
+    };
+
+    let mut page_map = PageMap::new_for_testing();
+    let old_pages: Vec<_> = (0..10)
+        .map(|i| (PageIndex::new(i), &[1_u8; PAGE_SIZE]))
+        .collect();
+    page_map.update(&old_pages);
+    page_map
+        .persist_unflushed_delta(&storage_layout, Height::new(0), &lsmt_config, &metrics)
+        .unwrap();
+    page_map.strip_unflushed_delta(Height::new(0));
+
+    let new_pages = vec![
+        (PageIndex::new(8), &[2_u8; PAGE_SIZE]),
+        (PageIndex::new(9), &[2_u8; PAGE_SIZE]),
+    ];
+    page_map.update(&new_pages);
+    page_map
+        .persist_unflushed_delta(&storage_layout, Height::new(2), &lsmt_config, &metrics)
+        .unwrap();
+
+    let mut page_map = PageMap::open(
+        Box::new(storage_layout),
+        Arc::new(TestPageAllocatorFileDescriptorImpl::new()),
+    )
+    .unwrap();
+    page_map.set_storage_page_limits(vec![StoragePageLimit {
+        max_pages: 8,
+        valid_storage_from_height: Some(Height::new(1)),
+    }]);
+    page_map.limit_storage_to_pages(9);
+
+    assert_eq!(page_map.get_page(PageIndex::new(7)), &[1_u8; PAGE_SIZE]);
+    assert_eq!(page_map.get_page(PageIndex::new(8)), &[2_u8; PAGE_SIZE]);
+    assert_eq!(page_map.get_page(PageIndex::new(9)), &[0_u8; PAGE_SIZE]);
+}
+
+#[test]
+fn storage_page_limit_can_hide_old_tail_without_dropping_regrown_delta() {
+    let metrics = StorageMetrics::new(&MetricsRegistry::new());
+    let lsmt_config = LsmtConfig {
+        shard_num_pages: u64::MAX,
+    };
+    let tempdir = Builder::new().prefix("page_map_test").tempdir().unwrap();
+    let storage_layout = ShardedTestStorageLayout {
+        dir_path: tempdir.path().to_path_buf(),
+        base: tempdir.path().join("vmemory_0.bin"),
+        overlay_suffix: "vmemory_0.overlay".into(),
+    };
+
+    let mut page_map = PageMap::new_for_testing();
+    let old_pages: Vec<_> = (0..10)
+        .map(|i| (PageIndex::new(i), &[0xAA_u8; PAGE_SIZE]))
+        .collect();
+    page_map.update(&old_pages);
+    page_map
+        .persist_unflushed_delta(&storage_layout, Height::new(0), &lsmt_config, &metrics)
+        .unwrap();
+    page_map.strip_unflushed_delta(Height::new(0));
+    let mut page_map = PageMap::open(
+        Box::new(storage_layout.clone()),
+        Arc::new(TestPageAllocatorFileDescriptorImpl::new()),
+    )
+    .unwrap();
+
+    page_map.limit_storage_to_pages_and_truncate_delta(5, 10);
+    assert!(page_map.should_flush());
+    assert_eq!(page_map.get_page(PageIndex::new(7)), &[0_u8; PAGE_SIZE]);
+
+    page_map.update(&[(PageIndex::new(7), &[0xBB_u8; PAGE_SIZE])]);
+    page_map.limit_storage_to_pages_and_truncate_delta(5, 10);
+    assert_eq!(page_map.get_page(PageIndex::new(7)), &[0xBB_u8; PAGE_SIZE]);
+}
+
+#[test]
+fn truncate_delta_to_pages_keeps_lower_dirty_pages_and_drops_tail() {
+    let mut page_map = PageMap::new_for_testing();
+    page_map.update(&[
+        (PageIndex::new(4), &[0x44_u8; PAGE_SIZE]),
+        (PageIndex::new(5), &[0x55_u8; PAGE_SIZE]),
+        (PageIndex::new(9), &[0x99_u8; PAGE_SIZE]),
+    ]);
+
+    page_map.limit_storage_to_pages_and_truncate_delta(5, 5);
+
+    assert_eq!(page_map.get_page(PageIndex::new(4)), &[0x44_u8; PAGE_SIZE]);
+    assert_eq!(page_map.get_page(PageIndex::new(5)), &[0_u8; PAGE_SIZE]);
+    assert_eq!(page_map.get_page(PageIndex::new(9)), &[0_u8; PAGE_SIZE]);
+    assert_eq!(page_map.get_page_delta_indices(), vec![PageIndex::new(4)]);
 }
 
 // Since tests run in the same process, we need to duplicate all file
@@ -327,7 +475,7 @@ fn serialize_page_map() {
     let page_7 = [7_u8; PAGE_SIZE];
     let pages = &[(PageIndex::new(1), &page_1), (PageIndex::new(3), &page_3)];
     sandbox.update(pages);
-    sandbox.strip_unflushed_delta();
+    sandbox.strip_unflushed_delta(Height::new(0));
     sandbox.update(&[(PageIndex::new(7), &page_7)]);
     // The sandbox process sends the dirty pages to the replica process.
     let page_delta =
@@ -660,7 +808,7 @@ fn get_memory_instructions_stops_at_instructions_outside_min_range() {
     page_map
         .persist_unflushed_delta(&storage_layout, Height::new(0), &lsmt_config, &metrics)
         .unwrap();
-    page_map.strip_unflushed_delta();
+    page_map.strip_unflushed_delta(Height::new(0));
 
     let pages = vec![
         (PageIndex::new(5), &[1_u8; PAGE_SIZE]),
@@ -734,7 +882,7 @@ fn get_memory_instructions_extends_mmap_past_min_range() {
     page_map
         .persist_unflushed_delta(&storage_layout, Height::new(0), &lsmt_config, &metrics)
         .unwrap();
-    page_map.strip_unflushed_delta();
+    page_map.strip_unflushed_delta(Height::new(0));
 
     let pages: Vec<_> = (15..40)
         .map(|i| (PageIndex::new(i), &[1_u8; PAGE_SIZE]))

@@ -197,6 +197,12 @@ impl PayloadBuilder {
         self
     }
 
+    pub fn stable64_shrink(mut self, removed_pages: u64) -> Self {
+        self = self.push_int64(removed_pages);
+        self.0.push(Ops::StableShrink64 as u8);
+        self
+    }
+
     pub fn stable_read(mut self, offset: u32, size: u32) -> Self {
         self = self.push_int(offset);
         self = self.push_int(size);

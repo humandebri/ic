@@ -3636,6 +3636,12 @@ impl SystemApi for SystemApiImpl {
         current_size: u64,
         removed_pages: u64,
     ) -> HypervisorResult<StableGrowOutcome> {
+        // This is only the runtime primitive for releasing a stable memory tail.
+        // Higher-level allocators must first move live data away from the tail,
+        // update their metadata, and then call `stable64_shrink` for the fully
+        // unused suffix. For example, a future MemoryManager bucket reclaimer
+        // should free buckets by MemoryId, compact live buckets to lower
+        // offsets incrementally, and shrink only complete free tail pages.
         if removed_pages > current_size {
             return Ok(StableGrowOutcome::Failure);
         }

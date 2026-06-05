@@ -156,6 +156,23 @@ fn storage_page_limit_can_hide_old_tail_without_dropping_regrown_delta() {
     assert_eq!(page_map.get_page(PageIndex::new(7)), &[0xBB_u8; PAGE_SIZE]);
 }
 
+#[test]
+fn truncate_delta_to_pages_keeps_lower_dirty_pages_and_drops_tail() {
+    let mut page_map = PageMap::new_for_testing();
+    page_map.update(&[
+        (PageIndex::new(4), &[0x44_u8; PAGE_SIZE]),
+        (PageIndex::new(5), &[0x55_u8; PAGE_SIZE]),
+        (PageIndex::new(9), &[0x99_u8; PAGE_SIZE]),
+    ]);
+
+    page_map.limit_storage_to_pages_and_truncate_delta(5, 5);
+
+    assert_eq!(page_map.get_page(PageIndex::new(4)), &[0x44_u8; PAGE_SIZE]);
+    assert_eq!(page_map.get_page(PageIndex::new(5)), &[0_u8; PAGE_SIZE]);
+    assert_eq!(page_map.get_page(PageIndex::new(9)), &[0_u8; PAGE_SIZE]);
+    assert_eq!(page_map.get_page_delta_indices(), vec![PageIndex::new(4)]);
+}
+
 // Since tests run in the same process, we need to duplicate all file
 // descriptors so that both page maps can close them.
 fn duplicate_file_descriptors(

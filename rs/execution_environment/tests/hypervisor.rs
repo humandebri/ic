@@ -8736,6 +8736,113 @@ fn stable64_shrink_failure_keeps_accounting_and_reserved_cycles() {
     );
 }
 
+fn run_stable64_shrink_then_trap_rolls_back_state_and_accounting() {
+    const CYCLES: Cycles = Cycles::new(200_000_000_000_000);
+
+    let mut test = ExecutionTestBuilder::new()
+        .with_precompiled_universal_canister(false)
+        .build();
+    let wat = r#"
+        (module
+            (import "ic0" "msg_reply" (func $msg_reply))
+            (import "ic0" "msg_reply_data_append"
+                (func $msg_reply_data_append (param i32 i32)))
+            (import "ic0" "stable64_grow"
+                (func $stable64_grow (param i64) (result i64)))
+            (import "ic0" "stable64_shrink"
+                (func $stable64_shrink (param i64) (result i64)))
+            (import "ic0" "stable64_read"
+                (func $stable64_read (param i64 i64 i64)))
+            (import "ic0" "stable64_write"
+                (func $stable64_write (param i64 i64 i64)))
+            (memory 1)
+            (func (export "canister_update init")
+                (i64.ne (call $stable64_grow (i64.const 2)) (i64.const 0))
+                (if (then unreachable))
+                (i32.store8 (i32.const 0) (i32.const 170))
+                (call $stable64_write (i64.const 65536) (i64.const 0) (i64.const 1))
+                (call $msg_reply)
+            )
+            (func (export "canister_update read_tail")
+                (call $stable64_read (i64.const 0) (i64.const 65536) (i64.const 1))
+                (call $msg_reply_data_append (i32.const 0) (i32.const 1))
+                (call $msg_reply)
+            )
+            (func (export "canister_update shrink_then_trap")
+                (i64.ne (call $stable64_shrink (i64.const 1)) (i64.const 2))
+                (if (then unreachable))
+                unreachable
+            )
+        )"#;
+    let canister_id = test.canister_from_cycles_and_wat(CYCLES, wat).unwrap();
+
+    assert_eq!(
+        test.ingress(canister_id, "init", vec![]),
+        Ok(WasmResult::Reply(vec![]))
+    );
+    assert_eq!(
+        test.ingress(canister_id, "read_tail", vec![]),
+        Ok(WasmResult::Reply(vec![0xAA]))
+    );
+
+    let stable_size_before = test
+        .canister_state(canister_id)
+        .execution_state
+        .as_ref()
+        .unwrap()
+        .stable_memory
+        .size;
+    let usage_before = test.canister_state(canister_id).execution_memory_usage();
+    let stable_usage_before = test.canister_state(canister_id).stable_memory_usage();
+    let available_before = test.subnet_available_memory().get_execution_memory();
+    let reserved_before = test
+        .canister_state(canister_id)
+        .system_state
+        .reserved_balance();
+
+    let err = test
+        .ingress(canister_id, "shrink_then_trap", vec![])
+        .unwrap_err();
+    assert_eq!(ErrorCode::CanisterTrapped, err.code());
+
+    assert_eq!(
+        stable_size_before,
+        test.canister_state(canister_id)
+            .execution_state
+            .as_ref()
+            .unwrap()
+            .stable_memory
+            .size
+    );
+    assert_eq!(
+        usage_before,
+        test.canister_state(canister_id).execution_memory_usage()
+    );
+    assert_eq!(
+        stable_usage_before,
+        test.canister_state(canister_id).stable_memory_usage()
+    );
+    assert_eq!(
+        available_before,
+        test.subnet_available_memory().get_execution_memory()
+    );
+    assert_eq!(
+        reserved_before,
+        test.canister_state(canister_id)
+            .system_state
+            .reserved_balance()
+    );
+    assert_eq!(
+        test.ingress(canister_id, "read_tail", vec![]),
+        Ok(WasmResult::Reply(vec![0xAA]))
+    );
+}
+
+#[test]
+fn stable64_shrink_then_trap_rolls_back_state_and_accounting() {
+    run_stable64_shrink_then_trap_rolls_back_state_and_accounting();
+}
+
 fn generate_wat_to_touch_pages(pages_to_touch: usize) -> String {
     format!(
         r#"

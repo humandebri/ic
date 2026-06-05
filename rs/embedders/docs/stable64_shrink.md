@@ -10,6 +10,12 @@ refund reserved cycles. On failure, stable memory size, accounting, and the
 `PageMap` stay unchanged. If the enclosing execution traps or rolls back, the
 shrink result is not committed.
 
+`stable64_shrink` is registered as an `ic0` System API import with the same
+validation path as the other stable64 functions. There is no separate feature
+flag in instrumentation or validation; rollout and compatibility are controlled
+by the replica version that accepts this import. Replicas that do not include
+this API reject modules importing it as an unknown System API function.
+
 `PageMap::storage_page_limits` makes pages at or above the shrink boundary
 invisible, including old checkpoint, base, and overlay pages. Pages written
 after a later grow remain visible across subsequent shrink, merge, snapshot,

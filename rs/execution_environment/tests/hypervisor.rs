@@ -10492,6 +10492,84 @@ fn page_metrics_are_recorded(
 }
 
 #[test]
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+fn stable64_shrink_regrow_counts_tail_stable_page_once() {
+    let mut test = ExecutionTestBuilder::new()
+        .with_deterministic_memory_tracker_enabled(false)
+        .build();
+    let wat = r#"
+        (module
+            (import "ic0" "msg_reply" (func $msg_reply))
+            (import "ic0" "stable64_grow" (func $stable64_grow (param i64) (result i64)))
+            (import "ic0" "stable64_shrink" (func $stable64_shrink (param i64) (result i64)))
+            (import "ic0" "stable64_write"
+                (func $stable64_write (param $offset i64) (param $src i64) (param $size i64))
+            )
+            (import "ic0" "stable64_read"
+                (func $stable64_read (param $dst i64) (param $offset i64) (param $size i64))
+            )
+            (func (export "canister_update test")
+                (i64.ne (call $stable64_grow (i64.const 2)) (i64.const 0))
+                (if (then unreachable))
+
+                ;; Dirty and access the tail stable page.
+                (i32.store8 (i32.const 0) (i32.const 42))
+                (call $stable64_write (i64.const 65536) (i64.const 0) (i64.const 1))
+
+                ;; Make the page logical tail, grow it back, and prove the old
+                ;; contents do not reappear.
+                (i64.ne (call $stable64_shrink (i64.const 1)) (i64.const 2))
+                (if (then unreachable))
+                (i64.ne (call $stable64_grow (i64.const 1)) (i64.const 1))
+                (if (then unreachable))
+                (call $stable64_read (i64.const 0) (i64.const 65536) (i64.const 1))
+                (i32.ne (i32.load8_u (i32.const 0)) (i32.const 0))
+                (if (then unreachable))
+
+                ;; Rewriting the same physical page index after regrow must not
+                ;; charge an extra stable page in the same execution.
+                (i32.store8 (i32.const 0) (i32.const 99))
+                (call $stable64_write (i64.const 65536) (i64.const 0) (i64.const 1))
+                (call $msg_reply)
+            )
+            (memory 1)
+        )"#;
+    let canister_id = test.canister_from_wat(wat).unwrap();
+    let result = test.ingress(canister_id, "test", vec![]).unwrap();
+    assert_eq!(WasmResult::Reply(vec![]), result);
+
+    assert_eq!(
+        fetch_histogram_vec_stats(test.metrics_registry(), "sandboxed_execution_dirty_pages"),
+        metric_vec(&[
+            (
+                &[("api_type", "update"), ("memory_type", "wasm")],
+                HistogramStats { count: 1, sum: 1.0 }
+            ),
+            (
+                &[("api_type", "update"), ("memory_type", "stable")],
+                HistogramStats { count: 1, sum: 1.0 }
+            ),
+        ])
+    );
+    assert_eq!(
+        fetch_histogram_vec_stats(
+            test.metrics_registry(),
+            "sandboxed_execution_accessed_pages"
+        ),
+        metric_vec(&[
+            (
+                &[("api_type", "update"), ("memory_type", "wasm")],
+                HistogramStats { count: 1, sum: 1.0 }
+            ),
+            (
+                &[("api_type", "update"), ("memory_type", "stable")],
+                HistogramStats { count: 1, sum: 1.0 }
+            ),
+        ])
+    );
+}
+
+#[test]
 fn ic0_certified_data_present() {
     let mut test = ExecutionTestBuilder::new().build();
     let canister_id = test.universal_canister().unwrap();
